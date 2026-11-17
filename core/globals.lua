@@ -443,6 +443,7 @@ SMODS.Atlas({ key="war_icons_locked",      path="locked_icon.png",       px=34, 
 -- produce (up to ~1.8e308) survives the JSON round-trip without loss of
 -- relative precision (~17 significant digits). The relay stores Python floats
 -- which have the same range and precision.
+SMODS.Atlas({ key="war_rs_giftcards",  path="giftcards.png",  px=71,  py=95  }) -- mrrow
 
 WAR.SCORE = {}
 

@@ -1,4 +1,3 @@
-
 WAR.RULESETS["weeworld"] = {
     key         = "weeworld",
     layers      = {},
@@ -30,9 +29,12 @@ local maxSets = {
     Tag      = 12,
 }
 
-WAR.RULESETS["weeworld"]["activate"] = function()
+WAR.RULESETS["weeworld"]["calculate"] = function(self, context)
+    if not context.war_gameStart then return end -- my precious indents*
 
-    G.GAME.banned_keys = {}
+    print("Hello World!")
+
+    G.GAME.banned_keys = G.GAME.banned_keys or {}
 
     local sets = {}
     local t2Vouchers = {}
@@ -87,4 +89,15 @@ WAR.RULESETS["weeworld"]["activate"] = function()
             end
         end
     end
+end
+
+
+-- hooks
+local showman_ref = SMODS.showman
+function SMODS.showman(card_key)
+    if WAR.GAME.active
+        and WAR.LOBBY.config.ruleset == "weeworld"
+        and WAR.LOBBY.config.weeworld_showman
+    then return true end
+	return showman_ref(card_key)
 end

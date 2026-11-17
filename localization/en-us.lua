@@ -197,6 +197,21 @@ return {
                 "Vouchers are unaffected.",
             },
 
+            -- Ruleset: Jimbo's Christmas
+            war_rs_xmas_name   = "Jimbo's Christmas",
+            war_rs_xmas_desc   = {
+                "UNFINISHED",
+                "",
+                "Every card has been wrapped up by Jimbo Claus!",
+                "All cards are now gift wrapped only to show their price.",
+                "Jokers may also show rarity in colour"
+            },
+                war_rs_xmas_cardName = "Wrapped Present", -- hidden cards
+                war_rs_xmas_cardDesc = {
+                    "This {C:attention}card{} has been {C:attention}wrapped{}!", 
+                    "{C:attention}Purchase{} this {C:attention}card{} to", "see what it really is"
+                },
+
             -- Lobby bar buttons
             war_ready                 = "READY",
             war_unready               = "UNREADY",

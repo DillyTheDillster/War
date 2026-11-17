@@ -125,15 +125,6 @@ function Game:start_run(start_params)
     end
     _orig_start_run(self, start_params)
     if WAR.GAME.active then
-        -- run gm and rs activation functions
-        local gm, rs = WAR.LOBBY.config.gamemode, WAR.LOBBY.config.ruleset
-        if WAR.GAMEMODES[gm] and WAR.GAMEMODES[gm]["activate"] then
-            WAR.GAMEMODES[gm]["activate"]()
-        end
-        if WAR.RULESETS[rs] and WAR.RULESETS[rs]["activate"] then
-            WAR.RULESETS[rs]["activate"]()
-        end
-
         -- Record stake and deck for end-of-match achievement increments.
         WAR.GAME.match_stake = G.GAME and G.GAME.stake
         WAR.GAME.match_deck  = G.GAME and G.GAME.back and G.GAME.back.name
@@ -146,6 +137,9 @@ function Game:start_run(start_params)
         for k in pairs(WAR.banned_keys_for(gm_key, rs_key)) do
             G.GAME.banned_keys[k] = true
         end
+
+        SMODS.calculate_context({war_gameStart = true}) -- no need to pass more, WAR.LOBBY.config and WAR have it already
+
         -- The first round's blind tags are pre-computed inside _orig_start_run
         -- before banned_keys is populated, so they can be banned items.
         -- Re-pick them now that the full ban list is final. Only fires when
@@ -765,7 +759,16 @@ end
 
 -- General WAR Mod Calculate - Typically used for achievement unlocks
 WAR.calculate = function(self, context)
+    -- WAR.RULESETS["xmas"]["calculate"](self, context) was using for testing
     if WAR.GAME.active then
+
+        local gm, rs = WAR.LOBBY.config.gamemode, WAR.LOBBY.config.ruleset
+        if WAR.GAMEMODES[gm] and WAR.GAMEMODES[gm]["calculate"] then
+            WAR.GAMEMODES[gm]["calculate"](self, context)
+        end
+        if WAR.RULESETS[rs] and WAR.RULESETS[rs]["calculate"] then
+            WAR.RULESETS[rs]["calculate"](self, context)
+        end
 
         if context.joker_type_destroyed then
             -- GaryGPT unlock condition
@@ -948,28 +951,6 @@ WAR.calculate = function(self, context)
                     WAR.GAME.count('steel')
                 end
             end
-        end
-    end
-
-    -- Packaged ruleset: replace each shop joker/consumable slot with a pack of the matching type.
-    -- Both players share the same relay seed so G.GAME._packaged_ctr advances identically on both
-    -- clients, keeping pack picks in sync.
-    if context.create_shop_card
-       and WAR.LOBBY.config.ruleset == "packaged"
-       and context.cardarea == G.shop_jokers
-    then
-        local type_to_packs = {
-            Joker    = { 'p_buffoon_normal_1',   'p_buffoon_jumbo_1'   },
-            Tarot    = { 'p_arcana_normal_1',    'p_arcana_jumbo_1'    },
-            Planet   = { 'p_celestial_normal_1', 'p_celestial_jumbo_1' },
-            Spectral = { 'p_spectral_normal_1',  'p_spectral_jumbo_1'  },
-        }
-        local packs = type_to_packs[context.set]
-        if packs then
-            G.GAME._packaged_ctr = (G.GAME._packaged_ctr or 0) + 1
-            local r = pseudorandom(pseudoseed('packaged_shop'
-                .. G.GAME.round_resets.ante .. G.GAME._packaged_ctr))
-            return { shop_create_flags = { set = 'Booster', key = r > 0.75 and packs[2] or packs[1] } }
         end
     end
 end
