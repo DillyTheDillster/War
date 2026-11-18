@@ -183,12 +183,33 @@ SMODS.Mods["War"].config_tab = function()
 
     accounts.nodes = { profile, manage_accounts }
 
-    -- Regular config
+    -- Regular config, right-hand column. Everything here is stored in
+    -- config/War.jkr for this client only — nothing is pushed to the relay, so
+    -- each player keeps their own copy.
     local _config = {
         n = G.UIT.C,
-        config = { r = 0.1, minw = 6.6, align = "cm", padding = 0.1, colour = G.C.BLACK },
+        config = { r = 0.1, minw = 6.6, minh = 5.6, align = "cm", padding = 0.1, colour = G.C.BLACK },
         nodes = {}
     }
+
+    -- Timer Auto Start: on (default) the opponent's clock starts counting the
+    -- second we ready up; off opens it paused at full time and leaves it to us
+    -- to release from the HUD.
+    if WAR.config and WAR.config.timer_auto_start == nil then
+        WAR.config.timer_auto_start = true
+    end
+    local timer_setting = create_toggle {
+        label     = localize('war_cfg_timer_auto'),
+        ref_table = WAR.config or {},
+        ref_value = 'timer_auto_start',
+        callback  = function()
+            -- Saved on the click, not on closing the menu, so a crash mid-run
+            -- can't lose the choice.
+            if SMODS and SMODS.save_mod_config then SMODS.save_mod_config(WAR) end
+        end,
+    }
+
+    _config.nodes = { timer_setting }
 
     ui_definition.nodes = { accounts, _config }
     return ui_definition

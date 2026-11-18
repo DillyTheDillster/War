@@ -100,6 +100,26 @@ WAR.RULESETS["standard"] = {
     -- and stay legal. Add fields here (or to a layer) to ban things again.
 }
 
+-- Jokers / vouchers / tags that interact with the boss blind.
+-- Applied as a modifier when pvp_boss_effects is turned off so the ban
+-- list flows through the normal layer system (banned_keys_for + bans_panel).
+WAR.Layer("no_boss_effects", {
+    banned_jokers   = { "j_chicot", "j_luchador" },
+    banned_vouchers = { "v_directors_cut", "v_retcon" },
+    banned_tags     = { "tag_boss" },
+})
+
+-- Keep WAR.MODIFIERS in sync with the pvp_boss_effects lobby option.
+-- Call this before any read of WAR.banned_keys_for or WAR.UI.bans_panel.
+function WAR.sync_option_modifiers(cfg)
+    cfg = cfg or (WAR.LOBBY and WAR.LOBBY.config) or {}
+    if cfg.pvp_boss_effects == false then
+        WAR.add_modifier("no_boss_effects")
+    else
+        WAR.remove_modifier("no_boss_effects")
+    end
+end
+
 -- Every banned key from a gamemode + ruleset pair, as key -> true.
 function WAR.banned_keys_for(gm_key, rs_key)
     local out = {}
@@ -111,6 +131,19 @@ function WAR.banned_keys_for(gm_key, rs_key)
         end
     end
     return out
+end
+
+-- banned_keys only culls the pools, so a tag named outright still works once
+-- it is in G.GAME.tags — Diet Cola and Anaglyph Deck both hard-code Double Tag,
+-- and any modded card can do the same. Every spawn goes through add_tag, which
+-- lovely patches to pass the tag through here first.
+function WAR.filter_tag(tag)
+    local banned = G and G.GAME and G.GAME.banned_keys
+    if not (banned and tag and tag.key and banned[tag.key]) then return tag end
+    local free = get_next_tag_key()
+    -- when the run allows no tag at all, keep the original rather than eat it
+    if free and not banned[free] then return Tag(free) end
+    return tag
 end
 
 -- G.CHALLENGES is a plain array, but vanilla hands out both numeric indices
@@ -299,13 +332,21 @@ function WAR.GAME.pvp_round()
     return WAR.GAME.is_pvp_blind or WAR.is_rival_blind()
 end
 
--- Rival score is hidden while the relay withholds it, and until we've played a
--- hand this blind (BMP does the same).
+-- Rival score is hidden when the relay marks it hidden (turn order mode: the
+-- relay sends noScore=true until you've played as many hands as the opponent).
+-- Exception: once both sides are at 0 hands the blind is over, so the score
+-- is always revealed regardless of any pending noScore flag.
 function WAR.GAME.score_masked()
-    if WAR.GAME.enemy_masked then return true end
-    if not (WAR.LOBBY.config and WAR.LOBBY.config.hide_score_until_played) then return false end
-    local played = G.GAME and G.GAME.current_round and G.GAME.current_round.hands_played
-    return (played or 0) == 0
+    if WAR.GAME.enemy_masked ~= true then return false end
+    if WAR.GAME.pvp_round and WAR.GAME.pvp_round() then
+        local cr = G.GAME and G.GAME.current_round
+        if cr and cr.hands_left == 0
+            and not WAR.GAME.enemy_hands_masked
+            and (WAR.GAME.enemy_hands or 0) == 0 then
+            return false
+        end
+    end
+    return true
 end
 
 -- Versions exchanged at join so a build mismatch shows up before the run starts.
@@ -328,6 +369,13 @@ function WAR.version_mismatch()
     return nil
 end
 
+-- Per-client preference (config/War.jkr), read at the moment we ready up: on
+-- means the opponent's clock runs while they decide, off means it opens paused.
+-- Missing key counts as on so existing installs keep the old behaviour.
+function WAR.GAME.timer_auto_start()
+    return not (WAR.config and WAR.config.timer_auto_start == false)
+end
+
 -- Blind clock is the relay's: it tells both clients how long is left, so the two
 -- countdowns can't disagree.
 function WAR.GAME.start_pvp_timer(secs, is_mine, paused)
@@ -343,15 +391,19 @@ function WAR.GAME.start_pvp_timer(secs, is_mine, paused)
         _orig_round       = orig,
     }
     -- Cue only a fresh start: the relay re-sends the clock as each side readies,
-    -- and a resume from pause is not a new blind.
-    if not paused and not prev then
+    -- and a resume from pause is not a new blind. An auto-pause on the way (see
+    -- G.FUNCS.select_blind) is suppressed too — that clock never runs, so
+    -- announcing it would be a lie.
+    if not paused and not prev and not WAR.GAME._timer_autopause then
         play_sound("other1", 1, 1)
     end
+    if paused then WAR.GAME._timer_autopause = nil end
     if WAR.UI and WAR.UI.setup_timer_hud then WAR.UI.setup_timer_hud() end
 end
 
 function WAR.GAME.stop_pvp_timer()
     local t = WAR.GAME._pvp_timer
+    WAR.GAME._timer_autopause = nil
     if t and t._orig_round and G.GAME then G.GAME.round = t._orig_round end
     WAR.GAME._pvp_timer = nil
     if WAR.UI and WAR.UI.reset_timer_hud then WAR.UI.reset_timer_hud() end

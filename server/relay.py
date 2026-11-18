@@ -409,8 +409,8 @@ def new_game_state():
         'guest_ready_blind':       False,
         'host_first_ready':        False,
         'guest_first_ready':       False,
-        'host_played_this_blind':  False,
-        'guest_played_this_blind': False,
+        'host_played_this_blind':  0,
+        'guest_played_this_blind': 0,
         'host_round_lives_blocker':False,
         'guest_round_lives_blocker':False,
         'host_timer_lives_blocker': False,
@@ -775,12 +775,13 @@ async def reset_per_blind(lobby):
     task = lobby.pop('_blind_timer_task', None)
     if task and not task.done():
         task.cancel()
+    _clear_timer_pause(lobby)
     lobby['host_ready_blind']        = False
     lobby['guest_ready_blind']       = False
     lobby['host_first_ready']        = False
     lobby['guest_first_ready']       = False
-    lobby['host_played_this_blind']  = False
-    lobby['guest_played_this_blind'] = False
+    lobby['host_played_this_blind']  = 0
+    lobby['guest_played_this_blind'] = 0
     lobby['host_round_lives_blocker']  = False
     lobby['guest_round_lives_blocker'] = False
     lobby['host_timer_lives_blocker']  = False
@@ -861,6 +862,13 @@ async def _broadcast_blind_timer(lobby, secs, late_role=None, paused=False):
         msg['paused'] = True
     await broadcast(lobby, msg)
 
+def _clear_timer_pause(lobby):
+    # A pause can outlive its clock (unready, both-ready, next blind). Left set,
+    # a stray resumeTimer would resurrect a timer for a blind that already ended
+    # and cost a life nobody was sitting on.
+    lobby['_timer_paused']           = False
+    lobby['_timer_paused_remaining'] = None
+
 async def _blind_timer_coro(lobby, late_role, secs):
     try:
         await asyncio.sleep(secs)
@@ -881,22 +889,33 @@ async def _blind_timer_coro(lobby, late_role, secs):
         pass
     finally:
         lobby.pop('_blind_timer_task', None)
-        lobby['_timer_paused'] = False
-        lobby['_timer_paused_remaining'] = None
-        await _broadcast_blind_timer(lobby, 0)
+        # If cancelled due to a pause, the pause handler already broadcast the
+        # paused state and owns _timer_paused/_timer_paused_remaining — don't
+        # stomp them or send a secs=0 that would reset the client HUD.
+        if not lobby.get('_timer_paused'):
+            lobby['_timer_paused'] = False
+            lobby['_timer_paused_remaining'] = None
+            await _broadcast_blind_timer(lobby, 0)
 
 async def handle_pause_timer(lobby, role, msg):
     late_role = lobby.get('_timer_late_role')
-    if role == late_role: return          # only the waiting (non-late) player can pause
-    if lobby.get('_timer_paused'): return  # already paused
+    if role == late_role:
+        log.info(f"pauseTimer rejected: role={role} is late_role")
+        return
+    if lobby.get('_timer_paused'):
+        log.info(f"pauseTimer rejected: already paused")
+        return
     task = lobby.get('_blind_timer_task')
-    if not task or task.done(): return
+    if not task or task.done():
+        log.info(f"pauseTimer rejected: no active task (task={task})")
+        return
     elapsed   = time.time() - (lobby.get('_timer_start') or time.time())
     remaining = max(0.0, (lobby.get('_timer_secs') or 0) - elapsed)
     task.cancel()
     lobby.pop('_blind_timer_task', None)
     lobby['_timer_paused']           = True
     lobby['_timer_paused_remaining'] = remaining
+    log.info(f"lobby {lobby.get('_code')} timer paused by {role}, {remaining:.1f}s remaining")
     await _broadcast_blind_timer(lobby, math.ceil(remaining), late_role, paused=True)
 
 async def handle_resume_timer(lobby, role, msg):
@@ -910,11 +929,13 @@ async def handle_resume_timer(lobby, role, msg):
         await lose_life(lobby, late_role, cause='timer')
         await _broadcast_blind_timer(lobby, 0)
         return
+    # Reset elapsed-time tracking so a subsequent pause computes correctly.
+    lobby['_timer_start'] = time.time()
+    lobby['_timer_secs']  = remaining
     lobby['_blind_timer_task'] = asyncio.create_task(
         _blind_timer_coro(lobby, late_role, remaining)
     )
-    lobby['_timer_start'] = time.time()
-    lobby['_timer_secs']  = remaining
+    # Tell both clients the timer is live again at the remaining seconds.
     await _broadcast_blind_timer(lobby, math.ceil(remaining), late_role)
 
 async def handle_ready_blind(lobby, role, msg):
@@ -948,6 +969,7 @@ async def handle_ready_blind(lobby, role, msg):
         if task and not task.done():
             task.cancel()
         lobby['_skip_timer_bonus'] = 0  # no timer needed; don't carry skip bonus into next blind
+        _clear_timer_pause(lobby)
         await _broadcast_blind_timer(lobby, 0)
         await _fire_start_blind(lobby)
     else:
@@ -978,6 +1000,7 @@ async def handle_unready_blind(lobby, role, msg):
     task = lobby.pop('_blind_timer_task', None)
     if task and not task.done():
         task.cancel()
+    _clear_timer_pause(lobby)
     await _broadcast_blind_timer(lobby, 0)
 
 async def handle_play_hand(lobby, role, msg):
@@ -1016,17 +1039,20 @@ async def handle_play_hand(lobby, role, msg):
         log_score = math.log10(score) if score > 0 else -1.0
     lobby[f'{role}_log_score'] = log_score
 
-    played_real = score > 0
-    if played_real:
-        lobby[f'{role}_played_this_blind'] = True
-
+    # Track how many hands this player has played this blind (for turn-order masking).
+    lobby[f'{role}_played_this_blind'] += 1
+    my_hands   = lobby[f'{role}_played_this_blind']
     enemy_role = get_enemy_role(role)
+    enemy_hands_played = lobby[f'{enemy_role}_played_this_blind']
+
     hide_score = lobby['options'].get('hide_score_until_played', False)
 
-    # Send enemyInfo to the opponent
+    # Send enemyInfo to the opponent.
+    # Turn order: show my score to the opponent only once they've played as many
+    # hands as I have — they see hand N's result only after they've played hand N.
     enemy_w = lobby.get(enemy_role)
     if enemy_w:
-        show = (not hide_score) or lobby[f'{enemy_role}_played_this_blind']
+        show = (not hide_score) or (enemy_hands_played >= my_hands)
         await send(enemy_w, {
             'action':    'enemyInfo',
             'handsLeft': hands_left,
@@ -1036,10 +1062,11 @@ async def handle_play_hand(lobby, role, msg):
             'lives':     lobby[f'{role}_lives'],
         })
 
-    # Send back current enemy state to the player who just played
+    # Send back the opponent's current score to the player who just played.
+    # Show it to them if they've now played as many hands as the opponent has.
     my_w = lobby.get(role)
     if my_w:
-        show_enemy = (not hide_score) or played_real
+        show_enemy = (not hide_score) or (my_hands >= enemy_hands_played)
         await send(my_w, {
             'action':    'enemyInfo',
             'handsLeft': lobby[f'{enemy_role}_hands_left'],
@@ -1252,7 +1279,8 @@ async def handle_lobby_options(lobby, role, msg):
         return
     for key in ('lives', 'seed', 'back', 'stake', 'challenge', 'gamemode', 'ruleset',
                 'death_on_round_loss', 'hide_score_until_played', 'pvp_start_ante',
-                'comeback_gold', 'timer_seconds', 'pvp_boss_effects', 'sleeve'):
+                'comeback_gold', 'timer_seconds', 'pvp_boss_effects', 'sleeve',
+                'weeworld_showman'):
         if key in msg:
             lobby['options'][key] = msg[key]
     # Relay to guest so they see the config update
@@ -1295,25 +1323,47 @@ async def dispatch(writer, msg):
         if lobby:
             role    = info.get('role')
             in_game = lobby.get('is_in_game', False)
-            await broadcast(lobby, {'action': 'peer_left'}, exclude=writer)
             if in_game:
+                # Mid-game leave: notify peer, stop the game, close lobby.
+                await broadcast(lobby, {'action': 'peer_left'}, exclude=writer)
                 await broadcast(lobby, {'action': 'stopGame'}, exclude=writer)
                 del lobbies[code]
                 log.info(f"lobby {code} closed (role={role} in_game, left)")
-            else:
-                if role == 'guest':
-                    if lobby.get('guest') is writer:
-                        lobby['guest'] = None
+            elif role == 'host':
+                guest_writer = lobby.get('guest')
+                if guest_writer is not None:
+                    # Promote the guest to host so they don't lose the lobby.
+                    lobby['host']              = guest_writer
+                    lobby['guest']             = None
+                    lobby['host_lobby_ready']  = False
+                    lobby['guest_lobby_ready'] = False
+                    # Carry the former guest's pfp into the host slot.
+                    guest_info = clients.get(guest_writer, {})
+                    lobby['host_pfp'] = guest_info.get('pfp', 'default')
+                    clients[guest_writer]['role'] = 'host'
+                    await send(guest_writer, {
+                        'action':  'promoted_to_host',
+                        'code':    code,
+                        'options': lobby.get('options', {}),
+                    })
+                    log.info(f"lobby {code} host left, guest promoted to host")
                 else:
-                    lobby['host'] = None
+                    # No guest — close the empty lobby.
+                    del lobbies[code]
+                    log.info(f"lobby {code} closed (host left, no guest)")
+            else:
+                # Guest leaves: notify host, keep lobby open for a new guest.
+                if lobby.get('guest') is writer:
+                    lobby['guest'] = None
                 lobby['host_lobby_ready']  = False
                 lobby['guest_lobby_ready'] = False
-                remaining = (lobby.get('host') is not None) or (lobby.get('guest') is not None)
+                await broadcast(lobby, {'action': 'peer_left'}, exclude=writer)
+                remaining = lobby.get('host') is not None
                 if not remaining:
                     del lobbies[code]
-                    log.info(f"lobby {code} closed (empty after {role} left)")
+                    log.info(f"lobby {code} closed (empty after guest left)")
                 else:
-                    log.info(f"lobby {code} {role} left, lobby held")
+                    log.info(f"lobby {code} guest left, lobby held")
         # keep connection alive — reused by next join/create without re-authing
         info.pop('code', None)
         info.pop('role', None)
@@ -1340,7 +1390,7 @@ async def dispatch(writer, msg):
         await broadcast(lobby, msg, exclude=writer)
     elif action in ('startGame', 'readyBlind', 'unreadyBlind', 'playHand',
                     'failRound', 'setAnte', 'setLocation', 'newRound', 'gameStats',
-                    'setLives'):
+                    'setLives', 'pauseTimer', 'resumeTimer'):
         info  = clients.get(writer)
         if not info: return
         lobby = lobbies.get(info.get('code'))

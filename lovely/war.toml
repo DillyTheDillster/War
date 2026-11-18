@@ -139,6 +139,20 @@ match_indent = true
 payload      = "local card = create_card((G.P_CENTERS[v] and G.GAME and G.GAME.banned_keys and G.GAME.banned_keys[v]) and G.P_CENTERS[v].set or 'Tarot', G.consumeables, nil, nil, nil, nil, v, 'deck')"
 times        = 1
 
+# The round-counter number box turns orange during a War blind timer and
+# becomes a pause/resume button for the waiting player.
+# Adding button = 'war_timer_toggle' here at load time means set_values()
+# properly arms collide.can/click.can — war_timer_toggle no-ops when no
+# timer is running so it is safe to leave it on permanently.
+[[patches]]
+[patches.pattern]
+target       = "functions/UI_definitions.lua"
+pattern      = "{n=G.UIT.R, config={align = \"cm\", r = 0.1, minw = 1.2, colour = temp_col2, id = 'row_round_text'}, nodes={"
+position     = "at"
+match_indent = true
+payload      = "{n=G.UIT.R, config={align = \"cm\", r = 0.1, minw = 1.2, colour = temp_col2, id = 'row_round_text', button = 'war_timer_toggle'}, nodes={"
+times        = 1
+
 # In the tag collection, apply the debuff shader on top of any tag that is
 # banned for the current run (weeworld and any ruleset using banned_keys).
 [[patches]]
@@ -150,4 +164,17 @@ match_indent = true
 payload      = '''if G.GAME and G.GAME.banned_keys and G.GAME.banned_keys[v.key] then
         temp_tag_sprite:define_draw_steps({{shader='dissolve',shadow_height=0.05},{shader='debuff'}})
     end'''
+times        = 1
+
+# banned_keys only culls the pools, so anything that hands out a tag by name
+# (Diet Cola and Anaglyph Deck hard-code Double Tag; a modded card can name any
+# key) still gets a working tag. Every tag spawn goes through add_tag, so one
+# call in there covers vanilla's own spawns and every mod's.
+[[patches]]
+[patches.pattern]
+target       = "functions/UI_definitions.lua"
+pattern      = "function add_tag(_tag)"
+position     = "after"
+match_indent = true
+payload      = "if WAR and WAR.filter_tag then _tag = WAR.filter_tag(_tag) end"
 times        = 1

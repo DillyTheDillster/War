@@ -339,6 +339,9 @@ end
 
 -- Rows for every non-empty category, gamemode bans first.
 function WAR.UI.bans_panel(gm_key, rs_key)
+    -- Sync option-driven modifiers (e.g. no_boss_effects) so they're included
+    -- in the resolved results regardless of when the tab is opened.
+    WAR.sync_option_modifiers(WAR.LOBBY and WAR.LOBBY.config)
     local gm = WAR.resolve_gamemode(gm_key)
     local rs = WAR.resolve_ruleset(rs_key)
     local out = {}

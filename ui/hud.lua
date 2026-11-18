@@ -414,17 +414,29 @@ end
 
 -- ── Timer HUD ─────────────────────────────────────────────────────────────
 -- When a blind timer is running, we hijack the "Round" label to say "Timer"
--- (or "Paused") and make the whole round-counter box clickable so the player
--- can pause/resume the visual countdown.  The relay's authoritative timer
--- keeps running regardless; local pause is display-only.
+-- (or "Paused") and turn the number box itself into an orange button.
+-- The waiting player (is_mine = true) can click it to pause/resume.
+-- The late player just sees the orange countdown with no click action.
 
 local function _round_label_node()
-    if not (G.HUD and G.HUD.get_UIE_by_ID) then return nil, nil end
+    if not (G.HUD and G.HUD.get_UIE_by_ID) then
+        WAR.log("[WAR HUD] _round_label_node: G.HUD not ready")
+        return nil, nil, nil
+    end
     local row = G.HUD:get_UIE_by_ID('row_round_text')
-    if not row then return nil, nil end
-    local c = row.parent
+    if not row then
+        WAR.log("[WAR HUD] _round_label_node: row_round_text not found")
+        return nil, nil, nil
+    end
+    local c     = row.parent
     local label = c and c.children[1] and c.children[1].children[1]
-    return c, label
+    return c, label, row
+end
+
+local function _round_dynatext()
+    if not (G.HUD and G.HUD.get_UIE_by_ID) then return nil end
+    local o = G.HUD:get_UIE_by_ID('round_UI_count')
+    return o and o.config and o.config.object
 end
 
 function WAR.UI.update_timer_hud_label()
@@ -440,44 +452,68 @@ function WAR.UI.update_timer_hud_label()
 end
 
 function WAR.UI.setup_timer_hud()
-    local c = _round_label_node()
-    if not c then return end
+    local c, _, row = _round_label_node()
+    if not c or not row then return end
     local t = WAR.GAME._pvp_timer
-    if c._war_timer_orig then
-        -- Timer already set up: re-sync button presence if is_mine changed.
-        if t and t.is_mine and not c.config.button then
-            c.config.hover  = true
-            c.config.button = 'war_timer_toggle'
-            c.config.shadow = true
-        elseif (not t or not t.is_mine) and c.config.button == 'war_timer_toggle' then
-            c.config.hover  = c._war_timer_orig.hover
-            c.config.button = c._war_timer_orig.button
-            c.config.shadow = c._war_timer_orig.shadow
+    local timer_colour = (t and t.paused) and G.C.RED or G.C.IMPORTANT
+    if row._war_timer_orig then
+        -- Already set up: re-sync colour and hover/shadow if is_mine changed.
+        row.config.colour = timer_colour
+        if t and t.is_mine then
+            row.config.hover      = true
+            row.config.shadow     = true
+            row.states.hover.can  = true
+        elseif not t or not t.is_mine then
+            row.config.hover      = row._war_timer_orig.hover
+            row.config.shadow     = row._war_timer_orig.shadow
+            row.states.hover.can  = row._war_timer_orig.hover_can
         end
         WAR.UI.update_timer_hud_label()
         return
     end
-    c._war_timer_orig = {
-        hover  = c.config.hover,
-        button = c.config.button,
-        shadow = c.config.shadow,
+    -- First time: save originals on the number box and style it.
+    local dyna = _round_dynatext()
+    row._war_timer_orig = {
+        colour      = row.config.colour,
+        hover       = row.config.hover,
+        hover_can   = row.states.hover.can,
+        shadow      = row.config.shadow,
+        dyna_col    = dyna and dyna.colours and dyna.colours[1],
+        dyna_scale  = dyna and dyna.scale,
     }
+    -- Orange (or red if paused) background, white number text.
+    row.config.colour    = timer_colour
+    row.states.hover.can = false  -- enabled below only for the waiting player
+    if dyna then
+        if dyna.colours then dyna.colours[1] = G.C.WHITE end
+        dyna.scale = (dyna.scale or 1) * 0.7
+        dyna:update_text(true)
+    end
     if t and t.is_mine then
-        c.config.hover  = true
-        c.config.button = 'war_timer_toggle'
-        c.config.shadow = true
+        row.config.hover      = true
+        row.config.shadow     = true
+        row.states.hover.can  = true
     end
     WAR.UI.update_timer_hud_label()
 end
 
 function WAR.UI.reset_timer_hud()
-    local c, label = _round_label_node()
+    local c, label, row = _round_label_node()
     if not c then return end
-    if c._war_timer_orig then
-        c.config.hover  = c._war_timer_orig.hover
-        c.config.button = c._war_timer_orig.button
-        c.config.shadow = c._war_timer_orig.shadow
-        c._war_timer_orig = nil
+    if row and row._war_timer_orig then
+        row.config.colour    = row._war_timer_orig.colour
+        row.config.hover     = row._war_timer_orig.hover
+        row.config.shadow    = row._war_timer_orig.shadow
+        row.states.hover.can = row._war_timer_orig.hover_can
+        local dyna = _round_dynatext()
+        if dyna and dyna.colours and row._war_timer_orig.dyna_col then
+            dyna.colours[1] = row._war_timer_orig.dyna_col
+        end
+        if dyna and row._war_timer_orig.dyna_scale then
+            dyna.scale = row._war_timer_orig.dyna_scale
+            dyna:update_text(true)
+        end
+        row._war_timer_orig = nil
     end
     if label then label.config.text = localize('k_round') end
 end
@@ -486,8 +522,14 @@ end
 -- and broadcasts the new state to both players via blindTimer.
 G.FUNCS.war_timer_toggle = function(e)
     local t = WAR.GAME._pvp_timer
-    if not (t and t.is_mine) then return end
-    WAR.NET.send({ action = t.paused and "resumeTimer" or "pauseTimer" })
+    if not (t and t.is_mine) then
+        WAR.log("[WAR] war_timer_toggle: blocked t=" .. tostring(t) .. " is_mine=" .. tostring(t and t.is_mine))
+        return
+    end
+    WAR.log("[WAR] war_timer_toggle: paused=" .. tostring(t.paused))
+    local action = t.paused and "resumeTimer" or "pauseTimer"
+    WAR.log("[WAR] war_timer_toggle: sending " .. action)
+    WAR.NET.send({ action = action })
 end
 
 WAR.log("[WAR] ui/hud loaded")

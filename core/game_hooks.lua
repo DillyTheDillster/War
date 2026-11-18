@@ -47,6 +47,10 @@ function Game:update(dt)
             if ok then
                 WAR.log("[WAR AUTH] auto-login as " .. tostring(WAR.AUTH.user))
             end
+            -- Validate the saved icon selection now that entitlements are known.
+            -- Resets to jimbo if the selected icon is achieve/special and this
+            -- account isn't entitled — covers wrong account and offline/guest cases.
+            if WAR.AVATAR.validate_choice then WAR.AVATAR.validate_choice() end
             if WAR.UI.update_connection_status then WAR.UI.update_connection_status() end
         end)
     end
@@ -134,6 +138,7 @@ function Game:start_run(start_params)
         local rs_key = WAR.LOBBY.config.ruleset or "standard"
         local gm_key = WAR.LOBBY.config.gamemode or "vanilla"
         G.GAME.banned_keys = G.GAME.banned_keys or {}
+        WAR.sync_option_modifiers(WAR.LOBBY.config)
         for k in pairs(WAR.banned_keys_for(gm_key, rs_key)) do
             G.GAME.banned_keys[k] = true
         end
@@ -155,10 +160,15 @@ function Game:start_run(start_params)
             end
         end
         -- Same issue: the first ante's voucher is pre-picked inside _orig_start_run
-        -- before banned_keys is populated. get_current_pool already filters banned
-        -- items, so a fresh call returns a non-banned voucher.
-        if G.GAME.current_round and G.GAME.banned_keys[G.GAME.current_round.voucher] then
+        -- before banned_keys is populated. Loop until the key is clean; each call
+        -- to get_next_voucher_key() advances pseudoseed('Voucher') so successive
+        -- picks don't just repeat the same banned key.
+        local _vpick = 0
+        while G.GAME.current_round
+            and G.GAME.banned_keys[G.GAME.current_round.voucher]
+            and _vpick < 20 do
             G.GAME.current_round.voucher = get_next_voucher_key()
+            _vpick = _vpick + 1
         end
     end
     if WAR.GAME.active and WAR.UI.setup_lives_hud then
@@ -616,11 +626,56 @@ add_round_eval_row = function(config)
     return _orig_add_round_eval_row(config)
 end
 -- The boss blind itself is untouched: a rival round is a real vanilla boss with
--- the rival layered on top. Only the target and the HUD change.
+-- the rival layered on top. Only the target and the HUD change. The one option
+-- that does touch it is pvp_boss_effects, which has to be applied here because
+-- this is where vanilla builds the blind.
 
 local _orig_set_blind = Blind.set_blind
 function Blind:set_blind(blind, reset, silent)
-    _orig_set_blind(self, blind, reset, silent)
+    -- Boss effects off: `disabled` alone cannot do it. Vanilla's set_blind
+    -- resets the flag itself, and the boss's setup — hand size, discards,
+    -- hands, the Amber Acorn joker shuffle, card debuffs — is keyed on
+    -- self.name and never looks at the flag. So the boss is handed over as a
+    -- nameless stand-in (no name, no debuff table, same dollars/mult so the
+    -- chip target is unchanged) and its identity is restored afterwards, with
+    -- `disabled` set for everything that fires during the round itself.
+    local suppress = (not reset) and blind ~= nil
+        and WAR.GAME.active
+        and WAR.LOBBY.config.pvp_boss_effects == false
+        and WAR.is_rival_blind(blind)
+    if suppress then
+        _orig_set_blind(self, {
+            name    = '',
+            key     = blind.key,
+            dollars = blind.dollars,
+            mult    = blind.mult,
+            boss    = blind.boss,
+            pos     = blind.pos,
+        }, reset, silent)
+        self.config.blind = blind
+        self.name         = blind.name
+        self.boss         = not not blind.boss
+        self.debuff       = blind.debuff or {}
+        self.dollars      = blind.dollars
+        self.mult         = blind.mult
+        self.pos          = blind.pos
+        self.disabled     = true
+        -- Vanilla's setup would have recorded these; leave them at 0 so a
+        -- mid-round Blind:disable() (sell a joker under Verdant Leaf) can't do
+        -- arithmetic on nil.
+        self.discards_sub = 0
+        self.hands_sub    = 0
+        -- The stand-in wrote the boss's own effect lines (vanilla fills them
+        -- from config.blind.key whatever the name is); disabled makes set_text
+        -- blank them again, which is what the HUD reads.
+        self:set_text()
+        -- blind_set would otherwise stay false (the HUD event that sets it is
+        -- skipped with no name), which hides the whole blind — rival chip
+        -- included — from the HUD.
+        self.blind_set    = true
+    else
+        _orig_set_blind(self, blind, reset, silent)
+    end
     -- reset/nil calls clear the blind (Amulet and friends use set_blind(nil, true));
     -- they must not pin a target or leave a badge behind.
     if reset or not blind then return end
@@ -652,14 +707,41 @@ end
 -- The barrier fires on the boss blind of a rival ante, whatever boss vanilla
 -- rolled — the boss itself stays in place.
 
+-- Sets the Boss blind button to its "Readied Up" appearance in-place.
+-- Called right after sending readyBlind so there is no popup delay.
+-- Colour is applied here AND re-applied every frame by the blind_choice_handler
+-- hook below (vanilla overwrites config.colour each frame via that func).
+local function _mark_blind_button_readied(e)
+    if not (e and e.config) then return end
+    e.config.colour = G.C.GREEN
+    e._war_readied  = true
+    -- Change the shared loc table; the T-node's ref_table watcher triggers next frame.
+    -- The update_blind_select hook skips the "Ready Up" override while _pending_blind_e is set.
+    if G.GAME and G.GAME.round_resets and G.GAME.round_resets.loc_blind_states then
+        G.GAME.round_resets.loc_blind_states.Boss = localize('war_blind_readied')
+    end
+end
+
 local _orig_select_blind = G.FUNCS.select_blind
 G.FUNCS.select_blind = function(e)
     if WAR.GAME.active and not WAR.GAME._blind_starting then
-        local blind  = e and e.config and e.config.ref_table
+        local blind = e and e.config and e.config.ref_table
         if blind and WAR.is_rival_blind(blind) then
+            if WAR.GAME._pending_blind_e then
+                -- Already readied — ignore duplicate calls (button rebuilt after boss
+                -- reroll, stale controller snap, etc.). Don't re-send readyBlind.
+                return
+            end
             WAR.GAME._pending_blind_e = e
             WAR.NET.send({ action = "readyBlind", skips = (G.GAME and G.GAME.skips) or 0 })
-            WAR.UI.show_waiting(localize('war_pvp_waiting'))
+            -- Auto-start off: the relay opens the opponent's clock as soon as we
+            -- ready up, so freeze it again straight away. Order is kept per
+            -- connection, so the pause lands before the clock spends a second.
+            if not WAR.GAME.timer_auto_start() and (tonumber(WAR.LOBBY.config.timer_seconds) or 0) > 0 then
+                WAR.GAME._timer_autopause = true
+                WAR.NET.send({ action = "pauseTimer" })
+            end
+            _mark_blind_button_readied(e)
             return
         end
     end
@@ -684,6 +766,39 @@ ease_ante = function(amt, ...)
         })
     end
     return result
+end
+
+-- Show "Ready Up" on the Boss blind button instead of the vanilla "Select"
+-- text when a War match is active and the boss is a rival blind.
+-- Vanilla rebuilds loc_blind_states only when blind_states change (cached),
+-- so hooking here and overwriting after the vanilla call is enough.
+local _orig_update_blind_select = Game.update_blind_select
+function Game:update_blind_select(dt)
+    _orig_update_blind_select(self, dt)
+    if not (WAR.GAME.active and G.GAME and G.GAME.round_resets) then return end
+    if G.GAME.round_resets.blind_states.Boss ~= 'Select' then return end
+    local boss_key = G.GAME.round_resets.blind_choices and G.GAME.round_resets.blind_choices.Boss
+    local boss = boss_key and G.P_BLINDS and G.P_BLINDS[boss_key]
+    if not WAR.is_rival_blind(boss) then return end
+    if WAR.GAME._pending_blind_e then
+        -- Player already readied: keep "Readied!" (colour enforced by bch hook below)
+        G.GAME.round_resets.loc_blind_states.Boss = localize('war_blind_readied')
+    else
+        G.GAME.round_resets.loc_blind_states.Boss = localize('war_blind_ready_up')
+    end
+end
+
+-- blind_choice_handler runs every frame on each blind card and resets the
+-- button colour to G.C.FILTER. Re-apply green afterwards when readied.
+local _orig_bch = G.FUNCS.blind_choice_handler
+G.FUNCS.blind_choice_handler = function(e)
+    _orig_bch(e)
+    if not WAR.GAME.active then return end
+    if not (e and e.config and e.config.id == 'Boss') then return end
+    local btn = e.UIBox and e.UIBox:get_UIE_by_ID('select_blind_button')
+    if btn and btn._war_readied then
+        btn.config.colour = G.C.GREEN
+    end
 end
 
 -- new_round() is a global function (functions/state_events.lua), not a

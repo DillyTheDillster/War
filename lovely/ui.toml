@@ -21,7 +21,10 @@ if WAR.is_pvp_blind() then
     local atlas_key, row = WAR.UI.rival_icon_row()
     local pos = { x = 0, y = row }
     self.children.animatedSprite = SMODS.create_sprite(self.T.x, self.T.y, self.T.w, self.T.h, atlas_key, pos)
-    self.children.main_blind_icon = WAR.UI.mini_blind(obj, self.T.w * 0.4, self.children.animatedSprite)
+    local war_cfg = (WAR.LOBBY and WAR.LOBBY.config) or {}
+    if war_cfg.pvp_boss_effects ~= false then
+        self.children.main_blind_icon = WAR.UI.mini_blind(obj, self.T.w * 0.4, self.children.animatedSprite)
+    end
 end
 """
 
@@ -43,21 +46,37 @@ if is_pvp_ante then
     local atlas_key, row = WAR.UI.rival_icon_row()
     local pos = { x = 0, y = row }
     blind_choice.animation = SMODS.create_sprite(0, 0, 1.4, 1.4, atlas_key, pos)
-    blind_choice.animation.children.main_blind_icon = WAR.UI.mini_blind(blind_choice.config, 1.4 * 0.4, blind_choice.animation)
+    if war_cfg.pvp_boss_effects ~= false then
+        blind_choice.animation.children.main_blind_icon = WAR.UI.mini_blind(blind_choice.config, 1.4 * 0.4, blind_choice.animation)
+    end
 end
 """
 
-# Replace blind name with opponent name during blind select
-# Only happens during PVP
+# Replace blind name with opponent name during blind select, and — with boss
+# effects off — drop the boss's own effect lines from the panel, which would
+# otherwise sit under the opponent's name. SMODS rewrites this line at load,
+# so the anchor is SMODS' text, not vanilla's.
 [[patches]]
 [patches.pattern]
 target       = "functions/UI_definitions.lua"
 pattern      = "local text_table = G.localization.descriptions[target.set][target.key].text_parsed"
-position     = "before"
+position     = "at"
 match_indent = true
 payload      = """
 if is_pvp_ante then
     local opp_name = WAR.LOBBY.is_host and WAR.LOBBY.guest_name or WAR.LOBBY.host_name
     if opp_name then loc_name = opp_name end
 end
+local text_table = (is_pvp_ante and war_cfg.pvp_boss_effects == false and {}) or G.localization.descriptions[target.set][target.key].text_parsed
 """
+
+# A rival round is decided by the race against the opponent, not by the boss's
+# chip target, so the blind choice panel advertises no score requirement.
+[[patches]]
+[patches.pattern]
+target       = "functions/UI_definitions.lua"
+pattern      = "local blind_amt = get_blind_amount(G.GAME.round_resets.blind_ante)*blind_choice.config.mult*G.GAME.starting_params.ante_scaling"
+position     = "at"
+match_indent = true
+payload      = "local blind_amt = is_pvp_ante and 0 or get_blind_amount(G.GAME.round_resets.blind_ante)*blind_choice.config.mult*G.GAME.starting_params.ante_scaling"
+times        = 1

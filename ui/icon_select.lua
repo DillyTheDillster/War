@@ -750,3 +750,16 @@ function WAR.ICON_SELECT.refresh()
         G.FUNCS.war_refresh_selected_icon_card()
     end
 end
+
+-- Remove any visible hover popups from all cards currently in the grid.
+-- Call this when navigating away from the icon select screen (account/lobby
+-- transitions) so popups don't linger after the overlay closes.
+WAR.UI.clear_icon_tips = function()
+    for _, area in ipairs(G.your_collection or {}) do
+        for _, c in ipairs(area.cards or {}) do
+            for _, k in ipairs({'_war_name_popup', '_war_cond_popup'}) do
+                if c[k] then c[k]:remove(); c[k] = nil end
+            end
+        end
+    end
+end

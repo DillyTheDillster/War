@@ -57,6 +57,7 @@ function WAR.SYNC.tick()
         elseif a == "created" then
             WAR.LOBBY.code    = m.code
             WAR.LOBBY.is_host = true
+            if WAR.UI.update_connection_status then WAR.UI.update_connection_status() end
             -- Push the host's options so the relay and the client agree on
             -- defaults even if the settings popup is never opened.
             if WAR.LOBBY.push_config then WAR.LOBBY.push_config() end
@@ -68,6 +69,7 @@ function WAR.SYNC.tick()
         elseif a == "joined" then
             WAR.LOBBY.code    = m.code
             WAR.LOBBY.is_host = false
+            if WAR.UI.update_connection_status then WAR.UI.update_connection_status() end
             WAR.LOBBY.peer_version = m.mod_version or m.host_mod_version
             WAR.LOBBY.peer_smods   = m.smods_version
             if WAR.AVATAR then
@@ -93,6 +95,19 @@ function WAR.SYNC.tick()
             else
                 if WAR.UI.on_peer_left then WAR.UI.on_peer_left() end
             end
+
+        elseif a == "promoted_to_host" then
+            -- The original host left; the relay has transferred the lobby to us.
+            WAR.LOBBY.is_host      = true
+            WAR.LOBBY.code         = m.code or WAR.LOBBY.code
+            WAR.LOBBY.peer_version = nil
+            WAR.LOBBY.peer_smods   = nil
+            -- Apply the options the original host had configured.
+            if m.options and type(m.options) == 'table' then
+                for k, v in pairs(m.options) do WAR.LOBBY.config[k] = v end
+            end
+            if WAR.UI.update_connection_status then WAR.UI.update_connection_status() end
+            if WAR.UI.on_promoted_to_host then WAR.UI.on_promoted_to_host() end
 
         elseif a == "peer_rejoined" then
             -- The other player reconnected to the lobby.
@@ -164,6 +179,7 @@ function WAR.SYNC.tick()
             if m.hide_score_until_played ~= nil then WAR.LOBBY.config.hide_score_until_played = m.hide_score_until_played end
             if m.comeback_gold           ~= nil then WAR.LOBBY.config.comeback_gold           = m.comeback_gold           end
             if m.pvp_boss_effects        ~= nil then WAR.LOBBY.config.pvp_boss_effects        = m.pvp_boss_effects        end
+            if m.weeworld_showman        ~= nil then WAR.LOBBY.config.weeworld_showman        = m.weeworld_showman        end
             if m.timer_seconds           ~= nil then WAR.LOBBY.config.timer_seconds           = tonumber(m.timer_seconds) or 0 end
             if WAR.UI.update_deck_info then WAR.UI.update_deck_info() end
             if WAR.UI.create_lobby_panels then WAR.UI.create_lobby_panels() end
@@ -178,6 +194,8 @@ function WAR.SYNC.tick()
         -- PvP blind barrier
         elseif a == "blindTimer" then
             local secs = tonumber(m.seconds) or 0
+            WAR.log(("[WAR] blindTimer secs=%s late=%s paused=%s"):format(
+                tostring(secs), tostring(m.late), tostring(m.paused)))
             if secs > 0 then
                 local my_role = WAR.LOBBY.is_host and "host" or "guest"
                 WAR.GAME.start_pvp_timer(secs, m.late ~= my_role, m.paused == true)
@@ -395,10 +413,9 @@ function WAR.SYNC.on_start_blind(m)
     WAR.UI.hide_waiting()
     WAR.UI.refresh_hud()
 
-    -- Suppress boss blind effects if the option is off
-    if WAR.LOBBY.config.pvp_boss_effects == false and G.GAME and G.GAME.blind then
-        G.GAME.blind.disabled = true
-    end
+    -- Boss effects are switched off inside the Blind:set_blind hook (see
+    -- game_hooks.lua): the blind object is rebuilt by new_round when the round
+    -- actually starts, so a flag set here would be wiped before it mattered.
 
     WAR.GAME.stop_pvp_timer()
 
@@ -421,8 +438,17 @@ function WAR.SYNC.on_start_blind(m)
             end
         end
     end
+    if not e and G.blind_select_opts and G.blind_select_opts.boss then
+        -- startBlind arrived before the player clicked (reconnect edge-case or
+        -- rare network timing). Find the Boss button so the blind still starts.
+        local fallback = G.blind_select_opts.boss:get_UIE_by_ID('select_blind_button')
+        if fallback and fallback.config then e = fallback end
+        if e then WAR.log("[WAR] on_start_blind: used fallback button (pending_blind_e was nil)") end
+    end
     if e then
-        G.FUNCS.select_blind(e)
+        -- pcall so _blind_starting is always reset even if select_blind errors.
+        local ok, err = pcall(G.FUNCS.select_blind, e)
+        if not ok then WAR.log("[WAR] on_start_blind select_blind error: " .. tostring(err)) end
     end
     WAR.GAME._blind_starting = false
 end

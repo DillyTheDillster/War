@@ -133,8 +133,13 @@ function WAR.AUTH.clear_session()
     WAR.AUTH.token  = nil
     WAR.AUTH.state  = "idle"
     WAR.AVATAR.entitlements = {}
-    WAR.AVATAR.selected = WAR.AVATAR.DEFAULT
-    WAR.config.icon = WAR.AVATAR.selected
+    -- Free icons are available to everyone and persist across accounts.
+    -- Achievement and special icons are account-bound; drop them on logout.
+    local _sel = WAR.AVATAR.icon(WAR.AVATAR.selected)
+    if not _sel or _sel.achieve or _sel.special then
+        WAR.AVATAR.selected = WAR.AVATAR.DEFAULT
+        WAR.config.icon     = WAR.AVATAR.DEFAULT
+    end
     -- Reset displayed stats so the previous account's numbers don't persist.
     WAR.AUTH.stats.wins        = "-"
     WAR.AUTH.stats.losses      = "-"
@@ -250,8 +255,11 @@ function WAR.AUTH.guest()
     WAR.AUTH.user  = "Guest"
     WAR.AUTH.token = nil
 
-    WAR.AVATAR.selected = WAR.AVATAR.DEFAULT
-    WAR.config.icon = WAR.AVATAR.selected
+    local _sel = WAR.AVATAR.icon(WAR.AVATAR.selected)
+    if not _sel or _sel.achieve or _sel.special then
+        WAR.AVATAR.selected = WAR.AVATAR.DEFAULT
+        WAR.config.icon     = WAR.AVATAR.DEFAULT
+    end
 end
 
 function WAR.AUTH.logout(cb)

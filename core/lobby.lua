@@ -2,18 +2,43 @@
 
 WAR.LOBBY_STATE = "none"
 
+-- Every option the lobby panel can change, back on the value it shows for a
+-- brand new lobby. A lobby inherits this table from the last one, so anything
+-- the host flipped there (timer, toggles, ante) has to be put back or the
+-- relay quietly serves the previous match's rules.
+function WAR.LOBBY.reset_options()
+    local cfg = WAR.LOBBY.config
+    cfg.lives                   = 4
+    cfg.timer_seconds           = 90
+    cfg.pvp_start_ante          = 3
+    cfg.pvp_ante_set            = nil   -- no explicit ante yet, so the gamemode's default applies
+    cfg.death_on_round_loss     = true
+    cfg.hide_score_until_played = false
+    cfg.comeback_gold           = true
+    cfg.pvp_boss_effects        = true
+    cfg.weeworld_showman        = true
+end
+
+-- Deck, stake, sleeve, challenge and seed belong to one lobby's run, never to
+-- the mod: a new lobby comes up on the vanilla run choices.
+function WAR.LOBBY.reset_run_choices()
+    local cfg = WAR.LOBBY.config
+    cfg.back      = "Red Deck"
+    cfg.stake     = 1
+    cfg.sleeve    = nil
+    cfg.challenge = nil
+    -- seed is left for the deck selector to pick; the relay calls gen_seed()
+    -- when the host never sets one.
+    cfg.seed      = nil
+end
+
 function WAR.LOBBY.create()
-    -- Gamemode and related config set by selection screen; apply defaults for anything missing
-    if not WAR.LOBBY.config.gamemode then WAR.LOBBY.config.gamemode = "vanilla" end
-    if not WAR.LOBBY.config.lives    then WAR.LOBBY.config.lives    = 4 end
-    -- Fresh lobby, fresh run choices: every lobby starts on the vanilla default
-    -- deck and stake instead of whatever the last run happened to use.
-    WAR.LOBBY.config.back      = "Red Deck"
-    WAR.LOBBY.config.stake     = 1
-    WAR.LOBBY.config.sleeve    = nil
-    WAR.LOBBY.config.challenge = nil
-    -- seed intentionally not set here; the deck selector is where the host picks it,
-    -- and the server calls gen_seed() when none is provided.
+    -- Gamemode and ruleset are picked by the selection screens that lead here;
+    -- everything else starts from the defaults.
+    WAR.LOBBY.reset_options()
+    WAR.LOBBY.reset_run_choices()
+    if not WAR.LOBBY.config.gamemode then WAR.LOBBY.config.gamemode = "vanilla"  end
+    if not WAR.LOBBY.config.ruleset  then WAR.LOBBY.config.ruleset  = "standard" end
 
     local ok, err = WAR.NET.connect()
     if not ok then return false, err end
@@ -33,12 +58,10 @@ end
 
 function WAR.LOBBY.join(code)
     WAR.LOBBY_STATE = "joining"
-    -- Drop the last run's choices before the host's config lands, so the panel
-    -- never shows a deck or stake from a previous match.
-    WAR.LOBBY.config.back      = "Red Deck"
-    WAR.LOBBY.config.stake     = 1
-    WAR.LOBBY.config.sleeve    = nil
-    WAR.LOBBY.config.challenge = nil
+    -- Start from the panel defaults too, so the read-only view never shows a
+    -- toggle left over from the last match before the host's config lands.
+    WAR.LOBBY.reset_options()
+    WAR.LOBBY.reset_run_choices()
     local ok, err = WAR.NET.connect()
     if not ok then WAR.LOBBY_STATE = "none"; return false, err end
     local mod_ver, smods_ver = WAR.mod_versions()
@@ -64,6 +87,7 @@ function WAR.LOBBY.push_config()
         ruleset                 = cfg.ruleset or "standard",
         timer_seconds           = cfg.timer_seconds or 0,
         pvp_boss_effects        = cfg.pvp_boss_effects ~= false,
+        weeworld_showman        = cfg.weeworld_showman ~= false,
         back                    = cfg.back or "Red Deck",
         stake                   = cfg.stake or 1,
         sleeve                  = cfg.sleeve or "",
@@ -79,20 +103,14 @@ function WAR.LOBBY.leave()
     WAR.LOBBY_STATE   = "none"
     WAR.GAME.active   = false
     WAR.MODIFIERS     = {}
-    WAR.LOBBY.config.lives                   = 4
-    WAR.LOBBY.config.timer_seconds           = 90
-    WAR.LOBBY.config.pvp_start_ante          = 3
-    WAR.LOBBY.config.seed                    = nil
+    WAR.LOBBY.reset_options()
     -- Run choices belong to the lobby that picked them; without this the next
     -- lobby inherits the deck, stake, sleeve and challenge of the last run.
+    WAR.LOBBY.config.seed                    = nil
     WAR.LOBBY.config.back                    = nil
     WAR.LOBBY.config.stake                   = nil
     WAR.LOBBY.config.sleeve                  = nil
     WAR.LOBBY.config.challenge               = nil
-    WAR.LOBBY.config.death_on_round_loss     = true
-    WAR.LOBBY.config.hide_score_until_played = false
-    WAR.LOBBY.config.comeback_gold           = true
-    WAR.LOBBY.config.pvp_boss_effects        = true
     if WAR.AVATAR then
         WAR.AVATAR._enemy_host  = "jimbo"
         WAR.AVATAR._enemy_guest = "jimbo"

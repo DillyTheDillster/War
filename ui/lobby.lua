@@ -188,6 +188,34 @@ function WAR.UI.on_peer_left()
     WAR.UI.show_lobby(G.UIDEF.war_lobby_bar())
 end
 
+-- Called when the relay promotes this player to host after the original host left.
+-- Resets role state, applies the carried-over options, and rebuilds the lobby
+-- panels with full host controls (ready, options, code reveal, leave).
+function WAR.UI.on_promoted_to_host()
+    WAR.LOBBY.host_name   = WAR.SYNC.my_username()
+    WAR.LOBBY.guest_name  = nil
+    WAR.LOBBY.ready       = false
+    WAR.LOBBY.peer_ready  = false
+    if WAR.AVATAR then
+        WAR.AVATAR._enemy_host  = "jimbo"
+        WAR.AVATAR._enemy_guest = "jimbo"
+    end
+    WAR.UI.update_lobby_status()
+    WAR.UI.update_deck_info()
+    WAR.UI.show_message(localize('war_promoted_to_host'))
+    G.FUNCS.wipe_on()
+    G.E_MANAGER:add_event(Event({
+        no_delete = true,
+        func = function()
+            if G.OVERLAY_MENU then G.FUNCS.exit_overlay_menu() end
+            local ok, err = pcall(WAR.UI.show_lobby, G.UIDEF.war_lobby_bar())
+            if not ok then WAR.log("[WAR UI] show_lobby (promoted) error: " .. tostring(err)) end
+            return true
+        end,
+    }))
+    G.FUNCS.wipe_off()
+end
+
 -- 4 equal-width slots: [Ready/Start] [Options] [Players|Code] [Leave]
 -- Matches Balatro native bar proportions (minh ~1.55, padding, emboss, rounded).
 
@@ -425,12 +453,17 @@ local function war_opts_gameplay_content()
     if cfg.hide_score_until_played == nil then cfg.hide_score_until_played = false end
     if cfg.comeback_gold           == nil then cfg.comeback_gold           = true  end
     if cfg.pvp_boss_effects        == nil then cfg.pvp_boss_effects        = true  end
+    if cfg.weeworld_showman        == nil then cfg.weeworld_showman        = true  end
     local nodes = {
         war_toggle(localize('war_opt_death_round'),   "death_on_round_loss"),
         war_toggle(localize('war_opt_hide_score'),    "hide_score_until_played"),
         war_toggle(localize('war_opt_comeback_gold'), "comeback_gold"),
         war_toggle(localize('war_opt_boss_effects'),  "pvp_boss_effects"),
     }
+    -- Showman Effect toggle only appears when the Wee World ruleset is active.
+    if cfg.ruleset == "weeworld" then
+        nodes[#nodes+1] = war_toggle(localize('war_opt_showman'), "weeworld_showman")
+    end
     return { n=G.UIT.ROOT, config={
         emboss=0.05, minh=4, r=0.1, minw=10,
         align="tm", padding=0.2, colour=G.C.BLACK,
@@ -1282,6 +1315,7 @@ function WAR.UI.create_lobby_panels()
             menu_card.children.front.states.visible = false
         end
     end
+    WAR.UI.update_lobby_info()
 end
 
 function WAR.UI.remove_lobby_panels()
@@ -1289,6 +1323,7 @@ function WAR.UI.remove_lobby_panels()
     if G.WAR_LOBBY_SPECTATORS then G.WAR_LOBBY_SPECTATORS:remove(); G.WAR_LOBBY_SPECTATORS = nil end
     if G.WAR_LOBBY_RIGHT      then G.WAR_LOBBY_RIGHT:remove();      G.WAR_LOBBY_RIGHT      = nil end
     if G.WAR_LOBBY_LOGO       then G.WAR_LOBBY_LOGO:remove();       G.WAR_LOBBY_LOGO       = nil end
+    if G.HUD_war_lobby_info   then G.HUD_war_lobby_info:remove();   G.HUD_war_lobby_info   = nil end
     -- Clear drag state; positions are kept in _panel_offsets for the session.
     WAR.UI._drag = { active=false, was_down=false, panel=nil, key=nil,
                      start_cx=0, start_cy=0, start_ox=0, start_oy=0 }
@@ -1484,6 +1519,53 @@ end
 -- release bump alone changes the label.
 local function _war_cs_label(status)
     return string.format(localize('war_cs_label'), WAR.mod_version(), status)
+end
+
+-- Gamemode / ruleset line shown directly below the version label while in a lobby.
+-- Clears itself when no lobby code is present.
+function WAR.UI.update_lobby_info()
+    if G.HUD_war_lobby_info then G.HUD_war_lobby_info:remove(); G.HUD_war_lobby_info = nil end
+    if not (G.STAGE and G.STAGE == G.STAGES.MAIN_MENU) then return end
+    if not WAR.LOBBY.code then return end
+
+    local cfg     = WAR.LOBBY.config
+    local gm_key  = cfg.gamemode or "vanilla"
+    local rs_key  = cfg.ruleset  or "standard"
+
+    -- Localize names, falling back to the raw key if the loc entry is missing.
+    local function loc_or_key(k)
+        local n = localize(k)
+        return (n == "ERROR" or n == nil) and k or n
+    end
+    local gm_name = loc_or_key('war_gm_' .. gm_key .. '_name')
+    local rs_name = loc_or_key('war_rs_' .. rs_key .. '_name')
+
+    G.HUD_war_lobby_info = UIBox({
+        definition = {
+            n = G.UIT.ROOT,
+            config = { align = "cm", colour = G.C.UI.TRANSPARENT_DARK },
+            nodes = {{
+                n = G.UIT.R,
+                config = { align = "cm", padding = 0.04 },
+                nodes = {{
+                    n = G.UIT.T,
+                    config = {
+                        text   = gm_name .. " / " .. rs_name,
+                        scale  = 0.25,
+                        colour = G.C.UI.TEXT_LIGHT,
+                        shadow = true,
+                    },
+                }},
+            }},
+        },
+        config = {
+            align  = "tri",
+            bond   = "Glued",
+            offset = { x = 0, y = 1.45 },
+            major  = G.ROOM_ATTACH,
+        },
+    })
+    G.HUD_war_lobby_info:align_to_major()
 end
 
 function WAR.UI.update_connection_status()

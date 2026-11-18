@@ -234,6 +234,16 @@ function WAR.AVATAR.save_choice(key)
     _write_setting(key)
 end
 
+-- Drop the selected icon back to DEFAULT if this account isn't entitled to it.
+-- Free icons always pass; achievement/special icons require an entitlements entry.
+-- Called after auto-login (when entitlements are populated) and covers both
+-- successful login with the wrong account and offline/failed login (empty list).
+function WAR.AVATAR.validate_choice()
+    if not WAR.AVATAR.is_entitled(WAR.AVATAR.selected) then
+        WAR.AVATAR.save_choice(WAR.AVATAR.DEFAULT)
+    end
+end
+
 WAR.AVATAR._enemy_host  = "jimbo"
 WAR.AVATAR._enemy_guest = "jimbo"
 

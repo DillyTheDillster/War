@@ -200,15 +200,13 @@ return {
             -- Ruleset: Jimbo's Christmas
             war_rs_xmas_name   = "Jimbo's Christmas",
             war_rs_xmas_desc   = {
-                "UNFINISHED",
-                "",
                 "Every card has been wrapped up by Jimbo Claus!",
                 "All cards are now gift wrapped only to show their price.",
                 "Jokers may also show rarity in colour"
             },
                 war_rs_xmas_cardName = "Wrapped Present", -- hidden cards
                 war_rs_xmas_cardDesc = {
-                    "This {C:attention}card{} has been {C:attention}wrapped{}!", 
+                    "This {C:attention}card{} has been {C:attention}wrapped{}!",
                     "{C:attention}Purchase{} this {C:attention}card{} to", "see what it really is"
                 },
 
@@ -253,8 +251,10 @@ return {
             war_opt_boss_effects      = "PvP Boss Effects",
             war_opt_pvp_ante          = "PvP Start Ante",
             war_opt_death_round       = "Death on Round Loss",
-            war_opt_hide_score        = "Hide Score Until Played",
+            war_opt_hide_score        = "Turn Order in PvP",
             war_opt_comeback_gold     = "Comeback Bonus",
+            war_opt_showman           = "Showman Effect",
+            war_cfg_timer_auto        = "Timer Auto Start on Ready Up",
 
             -- In-run cash-out
             war_comeback_bonus        = "Comeback",
@@ -296,6 +296,8 @@ return {
             war_blind_hurry           = "Opponent is waiting — select the blind!",
             war_timeout_you           = "Timed out! You lost a life.",
             war_timeout_enemy         = "Opponent timed out! They lost a life.",
+            war_blind_ready_up        = "Ready Up",
+            war_blind_readied         = "Readied!",
             war_panel_challenge       = "Challenge",
             war_select_cap            = "SELECT",
             war_end_ante              = "Ante",
@@ -337,6 +339,7 @@ return {
             war_relay_lost            = "Lost connection to relay.",
             war_server_error          = "Server error.",
             war_game_stopped          = "Game stopped.",
+            war_promoted_to_host      = "The host left. You are now the host.",
             war_opp_disconnected      = "Opponent disconnected.",
             war_opp_left              = "Opponent left the game.",
 

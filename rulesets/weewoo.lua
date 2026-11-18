@@ -32,7 +32,7 @@ local maxSets = {
 WAR.RULESETS["weeworld"]["calculate"] = function(self, context)
     if not context.war_gameStart then return end -- my precious indents*
 
-    print("Hello World!")
+    WAR.log("Hello World!")
 
     G.GAME.banned_keys = G.GAME.banned_keys or {}
 
