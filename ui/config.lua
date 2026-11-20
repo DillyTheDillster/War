@@ -241,5 +241,5 @@ function WAR.UI.on_stats(m)
     local l = p - w
     WAR.AUTH.stats.wins        = tostring(w)
     WAR.AUTH.stats.losses      = tostring(l)
-    WAR.AUTH.stats.win_percent = p > 0 and (math.floor(w / p * 100) .. "%") or "-%"
+    WAR.AUTH.stats.win_percent = p > 0 and (math.ceil(w / p * 100) .. "%") or "-%"
 end
