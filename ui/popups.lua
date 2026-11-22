@@ -133,7 +133,11 @@ function WAR.UI.wait_for_enemy()
 end
 
 local function _fmt_score(n)
-    if not n or n == 0 then return "0" end
+    if type(n) ~= "number" then n = tonumber(n) or 0 end
+    if n == 0 then return "0" end
+    -- Past a trillion the suffix reads as a wall of digits ("180000000000000.00B"),
+    -- so let vanilla's formatter switch it to exponent notation instead.
+    if n >= 1e12 then return WAR.SCORE.format(n) end
     if n >= 1e9  then return string.format("%.2fB", n / 1e9) end
     if n >= 1e6  then return string.format("%.2fM", n / 1e6) end
     if n >= 1e3  then return string.format("%.1fK", n / 1e3) end

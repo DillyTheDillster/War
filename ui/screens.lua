@@ -277,9 +277,14 @@ end
 -- Everything the gamemode + ruleset pair disables, shown as real Card objects
 -- so the art (soul layers included) and the vanilla hover popup come for free.
 
-local BAN_SCALE  = 0.62
-local BAN_COLS   = 5
-local BAN_CELL_W = 1.02
+local BAN_SCALE    = 0.62
+local BAN_COLS     = 5
+local BAN_CELL_W   = 1.02
+-- Maximum cards rendered per ban category.  When mods grow a set (extra jokers,
+-- tarots, etc.) rulesets like weeworld that ban by set-size can produce hundreds
+-- of banned keys; rendering them all as card objects overflows the popup.  Items
+-- past this limit collapse into a single "+N more" text row.
+local BAN_MAX_SHOW = BAN_COLS * 2   -- 10 cards = 2 full rows before overflow kicks in
 
 local function war_ban_name(key, set)
     local ok, name = pcall(localize, { type = "name_text", key = key, set = set })
@@ -358,13 +363,24 @@ function WAR.UI.bans_panel(gm_key, rs_key)
                 { n=G.UIT.T, config={ text=localize(cat.label), scale=0.34,
                     colour=G.C.ORANGE, shadow=true }},
             }}
+            local shown = math.min(#keys, BAN_MAX_SHOW)
             local row = nil
             for i, key in ipairs(keys) do
+                if i > shown then break end
                 if (i - 1) % BAN_COLS == 0 then
                     row = {}
                     out[#out+1] = { n=G.UIT.R, config={ align="cm" }, nodes=row }
                 end
                 row[#row+1] = war_ban_cell(key, cat.set)
+            end
+            if #keys > shown then
+                out[#out+1] = { n=G.UIT.R, config={ align="cl", padding=0.04 }, nodes={
+                    { n=G.UIT.T, config={
+                        text   = "+" .. (#keys - shown) .. " more",
+                        scale  = 0.28,
+                        colour = G.C.UI.TEXT_INACTIVE,
+                    }},
+                }}
             end
         end
     end

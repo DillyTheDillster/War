@@ -254,6 +254,8 @@ return {
             war_opt_hide_score        = "Turn Order in PvP",
             war_opt_comeback_gold     = "Comeback Bonus",
             war_opt_showman           = "Showman Effect",
+            war_opt_same_deck         = "Same Deck / Stake",
+            war_opt_same_seed         = "Same Seed",
             war_cfg_timer_auto        = "Timer Auto Start on Ready Up",
 
             -- In-run cash-out
@@ -300,6 +302,8 @@ return {
             war_blind_readied         = "Readied!",
             war_panel_challenge       = "Challenge",
             war_select_cap            = "SELECT",
+            war_tab_stake             = "Stake",
+            war_tab_deck_choice       = "Choose Deck",
             war_end_ante              = "Ante",
             war_end_new_record        = "New Record!",
             war_end_view_mine         = "My Board",
@@ -342,6 +346,9 @@ return {
             war_promoted_to_host      = "The host left. You are now the host.",
             war_opp_disconnected      = "Opponent disconnected.",
             war_opp_left              = "Opponent left the game.",
+            war_opp_forfeit           = "Opponent forfeited - you win the match.",
+            war_forfeit               = "Forfeit",
+            war_forfeit_confirm       = "Are You Sure?",
 
             -- Server error codes (see WAR.ERROR_KEYS)
             war_err_missing_fields    = "Missing username or password.",
@@ -352,6 +359,17 @@ return {
             war_err_no_user           = "Not logged in.",
             war_err_no_lobby          = "Lobby not found.",
             war_err_lobby_full        = "Lobby is full.",
+
+            -- Decksmith compat (compat/decksmith.lua)
+            war_compat_ds_missing     = "Your opponent's deck was built with Decksmith. Install Decksmith to play this match.",
+            war_compat_ds_protocol    = "Your opponent's Decksmith deck was made by a different version of War.",
+            war_compat_ds_invalid     = "Your opponent's Decksmith deck could not be read.",
+            war_compat_ds_no_data     = "This match runs a Decksmith deck, but its deck data did not arrive. One of you is on an older build.",
+
+            -- Revo's Vault compat (compat/revosvault.lua)
+            war_compat_printer_missing  = "Your opponent's deck is a Revo's Vault printer deck. Install Revo's Vault to play this match.",
+            war_compat_printer_no_data  = "This match runs a Revo's Vault printer deck, but the printer did not arrive. One of you is on an older build.",
+            war_compat_printer_protocol = "Your opponent's printer pick was made by a different version of War.",
 
             -- Deck selector
             -- Replaces vanilla "PLAY" button text while WAR._deck_selecting is active.

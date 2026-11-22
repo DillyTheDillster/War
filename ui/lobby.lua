@@ -59,6 +59,12 @@ function WAR.UI.deck_center(back_key, ch_tbl)
         return get_deck_from_name and get_deck_from_name(v) or nil
     end
     if ch_tbl then
+        -- A deck picked on the challenge outranks the challenge's own back, so
+        -- the panel shows the deck the run will actually use.
+        if back_key and back_key ~= "" and back_key ~= "Challenge Deck" then
+            local picked = resolve(back_key)
+            if picked then return picked end
+        end
         local t = ch_tbl.deck and ch_tbl.deck.type
         if type(t) == "table" then t = t.name or t.key end
         return resolve(t)
@@ -75,6 +81,188 @@ function WAR.UI.deck_sprite(center, w, h)
     local atlas = G.ASSET_ATLAS and G.ASSET_ATLAS[center.atlas or "centers"]
     if not atlas then return nil end
     return Sprite(0, 0, w or 1.6, h or 2.13, atlas, center.pos)
+end
+
+-- The lobby panel's deck preview is a real stacked deck, not a bare sprite.
+-- Anything that decorates a deck — Cryptid's edition, sticker, suit and seal
+-- decks, a mod that hooks a Back card's draw — paints a card the same way it
+-- paints the run-select preview, and a Sprite gets none of it. The area and the
+-- cards come from SMODS's own deck page so the panel looks like the real thing.
+-- The area is kept per panel and dropped when the panels go away; it is also
+-- registered in G.I.CARDAREA for its lifetime, so that list is cleaned alongside.
+WAR.UI._deck_area = nil
+
+-- How many cards the panel's deck looks like. SMODS's own deck page stacks ten;
+-- the stack reads as "a deck" and the per-card offset is what sells it.
+WAR.UI.DECK_STACK = 10
+
+-- CardSleeves paints a sleeve on its own card, same size as the deck and pushed
+-- down so the deck's top edge shows above it. Both numbers come from
+-- CardSleeves' replace_sleeve_sprite, so a sleeve in the panel sits exactly
+-- where it sits in the run select screen.
+local SLEEVE_OFFSET = { x = 0, y = 0.35 }
+
+-- How far the panel's deck sits above where its box centres it, as a fraction
+-- of card height. The sleeve ignores it (it stays in its square — see the
+-- overlay below, which adds the lift back), so only the cards move.
+local DECK_LIFT = 0.03
+
+function WAR.UI.drop_deck_card()
+    local area = WAR.UI._deck_area
+    WAR.UI._deck_area = nil
+    if not area then return end
+    for _, card in ipairs(area.cards or {}) do
+        if card.remove then card:remove() end
+    end
+    area.cards = {}
+    if G.I.CARDAREA then
+        for i = #G.I.CARDAREA, 1, -1 do
+            if G.I.CARDAREA[i] == area then table.remove(G.I.CARDAREA, i) end
+        end
+    end
+end
+
+-- SMODS's sprite factory knows about modded atlases with their own sprite class;
+-- fall back to a plain Sprite so an older Steamodded still draws the art.
+local function deck_back_sprite(center, w, h)
+    if SMODS and type(SMODS.create_sprite) == "function" then
+        local ok, spr = pcall(SMODS.create_sprite, 0, 0, w, h,
+                              center.atlas or "centers", center.pos, center.sprite_args)
+        if ok and spr then return spr end
+    end
+    return WAR.UI.deck_sprite(center, w, h)
+end
+
+-- Returns the CardArea holding the deck stack, or nil when the game does not
+-- give us the pieces (the caller then falls back to WAR.UI.deck_sprite).
+-- The stack is laid out here rather than by the area: SMODS and vanilla both
+-- nudge deck cards by a fraction of a pixel and drift them with the mouse, which
+-- reads as one flat card that moves on its own.
+function WAR.UI.deck_card(center, w, h, sleeve_key)
+    if not center or type(CardArea) ~= "table" or type(Card) ~= "table" then return nil end
+    w, h = w or (G.CARD_W or 1.6), h or (G.CARD_H or 2.13)
+    WAR.UI.drop_deck_card()
+
+    local stack = math.max(1, tonumber(WAR.UI.DECK_STACK) or 1)
+
+    local ok, area = pcall(function()
+        -- Straight out of SMODS's own deck page: same area config, same card
+        -- factory. Whatever the run select screen draws for a deck, this draws.
+        local page = SMODS and SMODS.RunSelect and SMODS.RunSelect.Pages
+            and SMODS.RunSelect.Pages.deck_choice
+
+        local a = CardArea(0, 0, w, h, {
+            card_limit      = 5,
+            type            = 'deck',
+            highlight_limit = 0,
+            deck_height     = 0.75,
+            thin_draw       = 1,
+            run_select              = 'deck_choice',
+            run_select_deck_preview = true,
+        })
+
+        -- Fixed stack. The deck area draws its cards last-to-first, so cards[1]
+        -- is painted last — the front of the pile — and rank 1 is the area's
+        -- brightest card (rank > 3 is what the vanilla deck dimming reads).
+        -- So the front card keeps rank 1, sits highest, and the rest of the
+        -- stack peeks out below it.
+        a.align_cards = function(self)
+            local n    = #self.cards
+            local step = (self.T.h or 0) * 0.02
+            for k, card in ipairs(self.cards) do
+                card.rank = k
+                card.T.x  = self.T.x + 0.5 * (self.T.w - card.T.w)
+                card.T.y  = self.T.y + 0.5 * (self.T.h - card.T.h)
+                          + (k - (n + 1) / 2) * step
+                          - (self.T.h or 0) * DECK_LIFT
+            end
+        end
+
+        local function plain_card(number)
+            if page and type(page.create_selection_card) == "function" and center.key then
+                local ok_c, made = pcall(page.create_selection_card, page, center.key, number, a)
+                if ok_c and made then return made end
+            end
+
+            local card = Card(a.T.x, a.T.y, w, h, nil, center)
+            card.sprite_facing = 'back'
+            card.facing        = 'back'
+
+            -- Vanilla hands a Back card the plain deck back; the deck's own art
+            -- lives in its center's atlas.
+            local spr = deck_back_sprite(center, w, h)
+            if spr then
+                if card.children.back and card.children.back.remove then
+                    card.children.back:remove()
+                end
+                card.children.back = spr
+                spr.states = spr.states or {}
+                spr.states.hover = spr.states.hover or card.states.hover
+                spr.states.click = spr.states.click or card.states.click
+                spr.states.drag  = spr.states.drag  or card.states.drag
+                if spr.states.collide then spr.states.collide.can = false end
+                if spr.set_role then
+                    spr:set_role({ major = card, role_type = 'Glued', draw_major = card })
+                end
+            end
+            return card
+        end
+
+        for j = 1, stack do
+            local card = plain_card(j)
+            if card then
+                -- Face down, the way the run select deck page shows a deck: the
+                -- back sprite is what carries the deck's art and the stacked
+                -- shading.
+                card.sprite_facing = 'back'
+                card.facing        = 'back'
+                -- A display, not a picker.
+                card.states.click.can = false
+                card.states.hover.can = false
+                card.params = card.params or {}
+                card.params.run_select_selection_choice = nil
+                a:emplace(card)
+            end
+        end
+
+        return a
+    end)
+    if not ok or not area then return nil end
+    WAR.UI._deck_area = area
+
+    -- Anything drawn over the stack — the sleeve, a deck's edition shader — is
+    -- painted by the area after its cards, so it has to be anchored to the front
+    -- of the pile (cards[1], last drawn, rank 1).
+    local front = area.cards and area.cards[1]
+    local sleeve_spr
+    if sleeve_key and sleeve_key ~= "" and WAR.COMPAT and WAR.COMPAT.sleeve_sprite then
+        local ok2, spr = pcall(WAR.COMPAT.sleeve_sprite, sleeve_key, w, h)
+        if ok2 then sleeve_spr = spr end
+    end
+    local deck_overlay = WAR.COMPAT and WAR.COMPAT.cryptid_deck_overlay
+        and WAR.COMPAT.cryptid_deck_overlay(center) or nil
+
+    if front and (sleeve_spr or deck_overlay) then
+        local orig_draw = area.draw
+        area.draw = function(self, ...)
+            orig_draw(self, ...)
+            local back = front.children and front.children.back
+            if not back then return end
+            if deck_overlay then deck_overlay(front) end
+            if sleeve_spr and back.T then
+                local T = sleeve_spr.T
+                -- The stack is lifted inside the box; the sleeve is not, so its
+                -- square stays where it was.
+                T.y = back.T.y + SLEEVE_OFFSET.y + (back.T.h or 0) * DECK_LIFT
+                T.x = back.T.x + SLEEVE_OFFSET.x
+                T.w, T.h = back.T.w, back.T.h
+                sleeve_spr.VT = T
+                sleeve_spr:draw()
+            end
+        end
+    end
+
+    return area
 end
 
 function WAR.UI.update_lobby_status()
@@ -103,19 +291,22 @@ function WAR.UI.update_lobby_status()
 end
 
 function WAR.UI.update_deck_info()
-    local back  = WAR.LOBBY.config.back
-    local stake = tonumber(WAR.LOBBY.config.stake) or 1
+    -- This client's own run choices: with Same Deck/Stake off the guest is not
+    -- playing the host's deck, so the panel has to show what it will run.
+    local mine  = (WAR.LOBBY.local_choices and WAR.LOBBY.local_choices()) or {}
+    local back  = mine.back
+    local stake = tonumber(mine.stake) or 1
     local sname = _get_stake_name(stake)
     -- A challenge run's deck is fixed by the challenge, so show its name
     -- instead of the literal "Challenge Deck" placeholder.
-    local ch = WAR.LOBBY.config.challenge
+    local ch = mine.challenge
     local ch_tbl = WAR.challenge_by_id(ch)
     local label = back
     if ch_tbl then
         label = localize(ch_tbl.id, "challenge_names") or ch_tbl.name or back
     end
     if label and label ~= "" then
-        local seed = WAR.LOBBY.config.seed
+        local seed = mine.seed
         local seed_str = (seed and seed ~= "" and seed ~= 0) and ("  ·  " .. tostring(seed)) or ""
         WAR.UI._lobby_deck_info = label .. "  ·  " .. sname .. seed_str
     else
@@ -388,6 +579,9 @@ local function war_toggle(label, ref_value)
         ref_value = ref_value,
         callback  = function()
             WAR.NET.send({ action="config", [ref_value]=cfg[ref_value] })
+            -- Same Deck/Stake and Same Seed change what the side panels show,
+            -- so refresh them now rather than on the next lobby event.
+            if WAR.UI.update_deck_info then WAR.UI.update_deck_info() end
         end,
     })
     if not WAR.LOBBY.is_host then
@@ -446,7 +640,27 @@ local function war_opts_general_content()
     }, nodes={ lives_ctrl, pvp_ante_ctrl, timer_ctrl }}
 end
 
--- Gameplay tab: toggles
+-- Gameplay tab: two pages. Page 1 is the match rules, page 2 decides whether
+-- the two players share a deck and a seed.
+WAR.LOBBY.opts_page = WAR.LOBBY.opts_page or 1
+
+local function war_page_row(page, total)
+    local opts = {}
+    for i = 1, total do
+        opts[i] = localize('k_page') .. ' ' .. i
+    end
+    return { n=G.UIT.R, config={ align="cm", padding=0.1, colour=G.C.CLEAR }, nodes={
+        create_option_cycle({
+            options        = opts,
+            current_option = page,
+            opt_callback   = 'war_opts_page_cycle',
+            w              = 2.5,
+            scale          = 0.75,
+            colour         = G.C.BLUE,
+        }),
+    }}
+end
+
 local function war_opts_gameplay_content()
     local cfg = WAR.LOBBY.config
     if cfg.death_on_round_loss    == nil then cfg.death_on_round_loss    = true  end
@@ -454,20 +668,44 @@ local function war_opts_gameplay_content()
     if cfg.comeback_gold           == nil then cfg.comeback_gold           = true  end
     if cfg.pvp_boss_effects        == nil then cfg.pvp_boss_effects        = true  end
     if cfg.weeworld_showman        == nil then cfg.weeworld_showman        = true  end
-    local nodes = {
-        war_toggle(localize('war_opt_death_round'),   "death_on_round_loss"),
-        war_toggle(localize('war_opt_hide_score'),    "hide_score_until_played"),
-        war_toggle(localize('war_opt_comeback_gold'), "comeback_gold"),
-        war_toggle(localize('war_opt_boss_effects'),  "pvp_boss_effects"),
-    }
-    -- Showman Effect toggle only appears when the Wee World ruleset is active.
-    if cfg.ruleset == "weeworld" then
-        nodes[#nodes+1] = war_toggle(localize('war_opt_showman'), "weeworld_showman")
+    if cfg.same_deck               == nil then cfg.same_deck               = true  end
+    if cfg.same_seed               == nil then cfg.same_seed               = true  end
+
+    local page  = (WAR.LOBBY.opts_page == 2) and 2 or 1
+    local nodes = {}
+
+    if page == 1 then
+        nodes[#nodes+1] = war_toggle(localize('war_opt_death_round'),   "death_on_round_loss")
+        nodes[#nodes+1] = war_toggle(localize('war_opt_hide_score'),    "hide_score_until_played")
+        nodes[#nodes+1] = war_toggle(localize('war_opt_comeback_gold'), "comeback_gold")
+        nodes[#nodes+1] = war_toggle(localize('war_opt_boss_effects'),  "pvp_boss_effects")
+        -- Showman Effect toggle only appears when the Wee World ruleset is active.
+        if cfg.ruleset == "weeworld" then
+            nodes[#nodes+1] = war_toggle(localize('war_opt_showman'), "weeworld_showman")
+        end
+    else
+        -- Same Deck/Stake covers everything the deck picker produces: deck,
+        -- stake, sleeve, challenge and the compat payloads that come with them.
+        nodes[#nodes+1] = war_toggle(localize('war_opt_same_deck'), "same_deck")
+        nodes[#nodes+1] = war_toggle(localize('war_opt_same_seed'), "same_seed")
     end
+
+    nodes[#nodes+1] = war_page_row(page, 2)
+
     return { n=G.UIT.ROOT, config={
         emboss=0.05, minh=4, r=0.1, minw=10,
         align="tm", padding=0.2, colour=G.C.BLACK,
     }, nodes=nodes}
+end
+
+-- Page switch: the tab's definition is built once when the popup opens, so the
+-- cheapest correct redraw is to reopen the dialog on the gameplay tab.
+function G.FUNCS.war_opts_page_cycle(e)
+    local n = e and e.to_key
+    if not n or n < 1 or n > 2 then return end
+    WAR.LOBBY.opts_page = n
+    WAR.LOBBY.opts_tab  = 2
+    WAR.UI.open_instant(G.UIDEF.war_options_popup())
 end
 
 -- Bans tab: what the active gamemode + ruleset disable.
@@ -494,9 +732,9 @@ function G.UIDEF.war_options_popup(back_func)
     top[#top+1] = create_tabs({
         colour = G.C.BOOSTER,
         tabs = {
-            { label=localize('war_tab_general'),  chosen=true, tab_definition_function=war_opts_general_content  },
-            { label=localize('war_tab_gameplay'),              tab_definition_function=war_opts_gameplay_content  },
-            { label=localize('war_tab_bans'),                  tab_definition_function=war_opts_bans_content      },
+            { label=localize('war_tab_general'),  chosen=((WAR.LOBBY.opts_tab or 1) == 1), tab_definition_function=war_opts_general_content  },
+            { label=localize('war_tab_gameplay'), chosen=((WAR.LOBBY.opts_tab or 1) == 2), tab_definition_function=war_opts_gameplay_content  },
+            { label=localize('war_tab_bans'),     chosen=((WAR.LOBBY.opts_tab or 1) == 3), tab_definition_function=war_opts_bans_content      },
         },
     })
     return create_UIBox_generic_options({
@@ -508,6 +746,9 @@ function G.UIDEF.war_options_popup(back_func)
 end
 
 function G.FUNCS.war_lobby_options(e)
+    -- Fresh opens land on General; the page buttons reopen straight onto
+    -- Gameplay by setting opts_tab themselves.
+    WAR.LOBBY.opts_tab = 1
     WAR.UI.open_instant(G.UIDEF.war_options_popup())
 end
 
@@ -693,50 +934,83 @@ end
 local _orig_start_run = G.FUNCS.start_run
 G.FUNCS.start_run = function(e, args)
     if WAR._deck_selecting then
-        -- Guest is in read-only browse mode — close cleanly without touching config.
-        if not WAR.LOBBY.is_host then
+        -- Same Deck/Stake on: the host's deck is the match's deck, so the guest
+        -- is only browsing — close cleanly without touching config. Off: the
+        -- guest's pick is its own and is sent to the relay on confirm.
+        local separate = WAR.LOBBY.config.same_deck == false
+        if not WAR.LOBBY.is_host and not separate then
             WAR._deck_selecting     = false
             WAR._deck_select_return = nil
             G.FUNCS.exit_overlay_menu()
             return
         end
         local return_dest         = WAR._deck_select_return
+        local as_host             = WAR.LOBBY.is_host
         WAR._deck_selecting       = false
         WAR._deck_select_return   = nil
         G.FUNCS.exit_overlay_menu()
         args = args or {}
-        -- Deck name: SMODS sends args.deck_choice.name, vanilla sends args.deck.name
-        WAR.LOBBY.config.back = args.challenge and "Challenge Deck"
-            or (args.deck_choice and type(args.deck_choice) == "table" and args.deck_choice.name)
+        -- Deck name: an explicit deck pick wins (a challenge can now run on a
+        -- chosen deck), then SMODS args.deck_choice, then the challenge's own
+        -- deck, then whatever was last viewed.
+        local back = (args.deck_choice and type(args.deck_choice) == "table" and args.deck_choice.name)
             or (args.deck and args.deck.name)
+            or (args.challenge and "Challenge Deck")
             or (G.GAME.viewed_back and G.GAME.viewed_back.name)
         -- Stake: SMODS sends args.stake_choice (order number), vanilla sends args.stake
-        WAR.LOBBY.config.stake     = args.stake_choice or args.stake or 1
-        WAR.LOBBY.config.challenge = (args.challenge and args.challenge.id) or ""
+        local stake     = args.stake_choice or args.stake or 1
+        local challenge = (args.challenge and args.challenge.id) or ""
         -- Seed: SMODS sets args.seed=nil when the enable toggle is off, even if
         -- the user typed something.  Fall back to choices.seed directly so the
         -- typed value isn't silently dropped.
-        local _seed = args.seed
-        if (not _seed or _seed == "") and
+        local seed = args.seed
+        if (not seed or seed == "") and
            SMODS and SMODS.RunSelect and SMODS.RunSelect.Setup then
             local ch = SMODS.RunSelect.Setup.choices
-            if ch and ch.seed and ch.seed ~= "" then _seed = ch.seed end
+            if ch and ch.seed and ch.seed ~= "" then seed = ch.seed end
         end
-        WAR.LOBBY.config.seed = (_seed and _seed ~= "") and _seed or nil
-        -- CardSleeves compat: capture sleeve choice if available.
-        if WAR.COMPAT and WAR.COMPAT.capture_sleeve then
-            WAR.LOBBY.config.sleeve = WAR.COMPAT.capture_sleeve(args)
+        seed = (seed and seed ~= "") and seed or nil
+        -- Compat: the sleeve and any modded deck data that came with the pick.
+        local sleeve = WAR.COMPAT and WAR.COMPAT.capture_sleeve
+            and WAR.COMPAT.capture_sleeve(args) or nil
+        local decksmith = WAR.COMPAT and WAR.COMPAT.capture_decksmith
+            and WAR.COMPAT.capture_decksmith() or nil
+        local printer = WAR.COMPAT and WAR.COMPAT.capture_printer
+            and WAR.COMPAT.capture_printer() or nil
+        -- Every other modded run-select page (compat/runselect.lua): the mods
+        -- nobody wrote a compat file for. Always a table when this client has
+        -- the RunSelect system at all, so "nothing picked" clears the guest's
+        -- leftovers instead of letting them run.
+        local pages = WAR.COMPAT and WAR.COMPAT.capture_pages
+            and WAR.COMPAT.capture_pages() or nil
+
+        local cfg = WAR.LOBBY.config
+        if as_host then
+            cfg.back, cfg.stake, cfg.challenge = back, stake, challenge
+            cfg.seed, cfg.sleeve              = seed, sleeve
+            cfg.decksmith, cfg.printer        = decksmith, printer
+            cfg.pages                         = pages
+        else
+            cfg.guest_back, cfg.guest_stake, cfg.guest_challenge = back, stake, challenge
+            cfg.guest_seed, cfg.guest_sleeve                     = seed, sleeve
+            cfg.guest_decksmith, cfg.guest_printer               = decksmith, printer
+            cfg.guest_pages                                      = pages
         end
         WAR.UI.update_deck_info()
-        if WAR.LOBBY.code and WAR.LOBBY.is_host then
+        if WAR.LOBBY.code and as_host then
             WAR.NET.send({
                 action    = "config",
-                back      = WAR.LOBBY.config.back,
-                stake     = WAR.LOBBY.config.stake,
-                challenge = WAR.LOBBY.config.challenge,
-                seed      = WAR.LOBBY.config.seed or "",
-                sleeve    = WAR.LOBBY.config.sleeve or "",
+                back      = cfg.back,
+                stake     = cfg.stake,
+                challenge = cfg.challenge,
+                seed      = cfg.seed or "",
+                sleeve    = cfg.sleeve or "",
+                decksmith = cfg.decksmith or "",
+                printer   = cfg.printer or "",
+                pages     = cfg.pages or "",
             })
+        elseif WAR.LOBBY.code then
+            WAR.LOBBY.push_guest_choices()
         end
         if return_dest == "rulesets" then
             WAR.UI.open(G.UIDEF.war_ruleset_select(WAR.UI._sel_gamemode, WAR.UI._sel_ruleset))
@@ -753,12 +1027,24 @@ end
 -- Re-arm the flags across the close so the pick lands in the lobby config.
 local _orig_start_challenge = G.FUNCS.start_challenge_run
 G.FUNCS.start_challenge_run = function(e)
-    local challenge = WAR.challenge_by_id(e and e.config and e.config.id)
-    if not (WAR._deck_selecting and challenge) then
-        return _orig_start_challenge(e)
+    local id = e and e.config and e.config.id
+    local challenge = WAR.challenge_by_id(id)
+    if not challenge then return _orig_start_challenge(e) end
+    -- Stake, deck and seed come from the challenge screen (WAR.CHALLENGE).
+    local args = (WAR.CHALLENGE and WAR.CHALLENGE.run_args and WAR.CHALLENGE.run_args(id))
+        or { stake = 1, challenge = challenge }
+
+    if not WAR._deck_selecting then
+        -- Started straight from the challenge screen: close it, then run with
+        -- whatever was picked. War's start_run wrapper falls through to vanilla
+        -- here because no deck select is armed.
+        if G.OVERLAY_MENU then G.FUNCS.exit_overlay_menu() end
+        G.FUNCS.start_run(e, args)
+        return
     end
-    -- Guest browse mode: same silent close as start_run.
-    if not WAR.LOBBY.is_host then
+
+    -- Same Deck/Stake on: a guest's challenge pick means nothing (browse mode).
+    if not WAR.LOBBY.is_host and WAR.LOBBY.config.same_deck ~= false then
         WAR._deck_selecting     = false
         WAR._deck_select_return = nil
         G.FUNCS.exit_overlay_menu()
@@ -768,7 +1054,7 @@ G.FUNCS.start_challenge_run = function(e)
     G.FUNCS.exit_overlay_menu()
     WAR._deck_selecting     = true
     WAR._deck_select_return = return_dest
-    G.FUNCS.start_run(e, { stake = 1, challenge = challenge })
+    G.FUNCS.start_run(e, args)
 end
 
 -- Hook 4: intercept Back button inside setup_run (back_func = "options" in vanilla).
@@ -871,25 +1157,34 @@ local function war_apply_smods_hooks()
     end
 end
 
--- Restore previously selected deck/stake/seed before opening setup_run.
+-- Restore this client's run choices before opening setup_run.
 local function war_restore_deck_state()
     -- The run-select screen keeps whatever the last run used, so a lobby with
     -- nothing picked has to be pushed back to the vanilla defaults or the stale
-    -- deck/sleeve/stake come along into the next lobby and into the run.
-    local back_name = WAR.LOBBY.config.back or "Red Deck"
+    -- deck/sleeve/stake come along into the next lobby and into the run. With
+    -- Same Deck/Stake off the guest restores its own picks, not the host's.
+    local mine = WAR.LOBBY.local_choices()
+    local back_name = mine.back or "Red Deck"
     pcall(function()
         G.GAME.viewed_back = Back(get_deck_from_name(back_name))
     end)
-    local stake = tonumber(WAR.LOBBY.config.stake) or 1
+    local stake = tonumber(mine.stake) or 1
     G.viewed_stake = stake
     pcall(function() G.FUNCS.change_stake({to_key = stake}) end)
     -- CardSleeves reads G.viewed_sleeve when the run is confirmed.
     if WAR.COMPAT and WAR.COMPAT.sleeve_sprite then
-        G.viewed_sleeve = WAR.LOBBY.config.sleeve or "sleeve_casl_none"
+        G.viewed_sleeve = mine.sleeve or "sleeve_casl_none"
+    end
+    -- Put any modded deck back into its own picker (Decksmith's deck contents,
+    -- Revo's Vault printer pick) so the screen opens on what this client runs.
+    if WAR.COMPAT then
+        if WAR.COMPAT.apply_decksmith then WAR.COMPAT.apply_decksmith(mine.decksmith, back_name) end
+        if WAR.COMPAT.apply_printer   then WAR.COMPAT.apply_printer(mine.printer, back_name) end
+        if WAR.COMPAT.apply_pages     then WAR.COMPAT.apply_pages(mine.pages) end
     end
     -- Restore seed into SMODS run selector
     if SMODS and SMODS.RunSelect and SMODS.RunSelect.Setup then
-        local seed = WAR.LOBBY.config.seed
+        local seed = mine.seed
         if seed and seed ~= "" and seed ~= 0 then
             SMODS.RunSelect.Setup.choices.seed        = tostring(seed)
             SMODS.RunSelect.Setup.choices.enable_seed = true
@@ -960,7 +1255,10 @@ function G.FUNCS.war_open_deck_stake(e)
     WAR._deck_selecting     = true
     WAR.UI.enter_war_profile()
     war_apply_smods_hooks()
-    if WAR.LOBBY.is_host then war_restore_deck_state() end
+    -- The guest restores its own picks when it is allowed to have them.
+    if WAR.LOBBY.is_host or WAR.LOBBY.config.same_deck == false then
+        war_restore_deck_state()
+    end
     G.FUNCS.setup_run(e)
     war_clean_run_select_ui()
 end
@@ -971,7 +1269,9 @@ function G.FUNCS.war_open_deck_stake_pre_lobby(e)
     WAR._deck_selecting     = true
     WAR.UI.enter_war_profile()
     war_apply_smods_hooks()
-    if WAR.LOBBY.is_host then war_restore_deck_state() end
+    if WAR.LOBBY.is_host or WAR.LOBBY.config.same_deck == false then
+        war_restore_deck_state()
+    end
     G.FUNCS.setup_run(e)
     war_clean_run_select_ui()
 end
@@ -1127,27 +1427,50 @@ function WAR.UI.create_lobby_panels()
     })
 
     -- Right panel: vertical stack
-    local stake = tonumber(cfg.stake) or 1
+    -- Deck/stake/seed are this client's own run choices. With Same Deck/Stake
+    -- off the guest plays its own deck, so reading cfg directly here showed the
+    -- host's numbers to the guest and made its pick look ignored.
+    local mine  = (WAR.LOBBY.local_choices and WAR.LOBBY.local_choices()) or cfg
+    -- Modded page picks are what a decorated deck draws from (Cryptid's edition,
+    -- sticker, suit and seal decks read them while the preview card draws), so
+    -- this client's picks have to be in the selector tables before that card is
+    -- built.
+    if WAR.COMPAT and WAR.COMPAT.apply_pages then WAR.COMPAT.apply_pages(mine.pages) end
+    local stake = tonumber(mine.stake) or 1
     local lives = tonumber(cfg.lives) or 4
-    local seed  = (cfg.seed and cfg.seed ~= "" and cfg.seed ~= 0)
-                  and tostring(cfg.seed) or localize('war_panel_seed_random')
+    local seed  = (mine.seed and mine.seed ~= "" and mine.seed ~= 0)
+                  and tostring(mine.seed) or localize('war_panel_seed_random')
 
-    -- Deck sprite — challenges resolve through their own deck, and a modded deck
+    -- Deck card — challenges resolve through their own deck, and a modded deck
     -- lives in its own atlas, so the center decides which sheet to draw from.
+    -- Native card size: the deck should look like a deck, not a thumbnail, and
+    -- the sleeve art only lines up at the size the game draws it at.
+    local DECK_W   = G.CARD_W or 1.6     -- native card size: the deck has to look
+    local DECK_H   = G.CARD_H or 2.13    -- like a deck, not a thumbnail
+    local DECK_PAD = 0.18                -- breathing room inside the red deck box
     local deck_node
-    local ch_tbl      = WAR.challenge_by_id(cfg.challenge)
-    local deck_center = WAR.UI.deck_center(cfg.back, ch_tbl)
+    local ch_tbl      = WAR.challenge_by_id(mine.challenge)
+    local deck_center = WAR.UI.deck_center(mine.back, ch_tbl)
     if not deck_center and G.GAME and G.GAME.selected_back
        and G.GAME.selected_back.effect then
         deck_center = G.GAME.selected_back.effect.center
     end
     if deck_center then
-        local ok, deck_spr = pcall(WAR.UI.deck_sprite, deck_center, 1.6, 2.13)
+        -- A real Back card, so mod deck decoration (editions, stickers, seals,
+        -- suits) is drawn by the mod that owns it. The area is what goes in the
+        -- panel; the sprite path below is only for a game that cannot make one.
+        local deck_card = WAR.UI.deck_card(deck_center, DECK_W, DECK_H, mine.sleeve)
+        if deck_card then
+            deck_node = { n=G.UIT.O, config={ object=deck_card, w=DECK_W, h=DECK_H } }
+        end
+    end
+    if deck_center and not deck_node then
+        local ok, deck_spr = pcall(WAR.UI.deck_sprite, deck_center, DECK_W, DECK_H)
         if ok and deck_spr then
-            local sleeve_key = cfg.sleeve
+            local sleeve_key = mine.sleeve
             if sleeve_key and sleeve_key ~= ""
                and WAR.COMPAT and WAR.COMPAT.sleeve_sprite then
-                local ok2, sleeve_spr = pcall(WAR.COMPAT.sleeve_sprite, sleeve_key, 1.6, 2.13)
+                local ok2, sleeve_spr = pcall(WAR.COMPAT.sleeve_sprite, sleeve_key, DECK_W, DECK_H)
                 if ok2 and sleeve_spr then
                     local orig_draw = deck_spr.draw
                     deck_spr.draw = function(self)
@@ -1160,19 +1483,22 @@ function WAR.UI.create_lobby_panels()
                     end
                 end
             end
-            deck_node = { n=G.UIT.O, config={ object=deck_spr, w=1.6, h=2.13 } }
+            deck_node = { n=G.UIT.O, config={ object=deck_spr, w=DECK_W, h=DECK_H } }
         end
     end
     if not deck_node then
         deck_node = { n=G.UIT.T, config={
-            text=(cfg.back and cfg.back ~= "" and cfg.back) or "—",
+            text=(mine.back and mine.back ~= "" and mine.back) or "—",
             scale=0.32, colour=G.C.WHITE, shadow=true,
         }}
     end
 
     local RS = 0.28   -- text scale for right panel info boxes
-    local RW = 1.8    -- min box width (drives right panel visible width: ~1.8+0.24+0.24 ≈ 2.3u)
+    -- The deck box sets the panel's width: every row under it matches the deck
+    -- card plus its padding, so the stack lines up with the info boxes.
+    local RW = DECK_W + DECK_PAD * 2
     local RH = 0.60   -- uniform box height for grid look
+    local DECK_BOX_H = DECK_H + DECK_PAD * 2
 
     local stake_sprite = WAR.UI.stake_sprite(ch_tbl and 1 or stake, 0.32)
     local stake_name   = ch_tbl
@@ -1216,7 +1542,8 @@ function WAR.UI.create_lobby_panels()
     local right_content = {
         { n=G.UIT.R, config={ align="cm", r=0.08,
             colour=mix_colours(G.C.RED, G.C.BLACK, 0.7),
-            outline=1, outline_colour=G.C.RED, emboss=0.05, padding=0.07,
+            outline=1, outline_colour=G.C.RED, emboss=0.05,
+            padding=DECK_PAD, minw=RW, minh=DECK_BOX_H,
         }, nodes={ deck_node }},
         { n=G.UIT.R, config={ minh=0.08 }, nodes={} },
         stake_box,
@@ -1324,6 +1651,9 @@ function WAR.UI.remove_lobby_panels()
     if G.WAR_LOBBY_RIGHT      then G.WAR_LOBBY_RIGHT:remove();      G.WAR_LOBBY_RIGHT      = nil end
     if G.WAR_LOBBY_LOGO       then G.WAR_LOBBY_LOGO:remove();       G.WAR_LOBBY_LOGO       = nil end
     if G.HUD_war_lobby_info   then G.HUD_war_lobby_info:remove();   G.HUD_war_lobby_info   = nil end
+    -- The deck preview card lives outside the panel's UI tree (a CardArea in
+    -- G.I.CARDAREA), so it goes with the panel here or it is never freed.
+    if WAR.UI.drop_deck_card then WAR.UI.drop_deck_card() end
     -- Clear drag state; positions are kept in _panel_offsets for the session.
     WAR.UI._drag = { active=false, was_down=false, panel=nil, key=nil,
                      start_cx=0, start_cy=0, start_ox=0, start_oy=0 }

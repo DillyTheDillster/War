@@ -17,6 +17,8 @@ function WAR.LOBBY.reset_options()
     cfg.comeback_gold           = true
     cfg.pvp_boss_effects        = true
     cfg.weeworld_showman        = true
+    cfg.same_deck               = true
+    cfg.same_seed               = true
 end
 
 -- Deck, stake, sleeve, challenge and seed belong to one lobby's run, never to
@@ -27,9 +29,72 @@ function WAR.LOBBY.reset_run_choices()
     cfg.stake     = 1
     cfg.sleeve    = nil
     cfg.challenge = nil
+    cfg.decksmith = nil
+    cfg.printer   = nil
+    cfg.pages     = nil
+    -- The guest's own picks, used when Same Deck/Stake is off.
+    cfg.guest_back      = "Red Deck"
+    cfg.guest_stake     = 1
+    cfg.guest_sleeve    = nil
+    cfg.guest_challenge = nil
+    cfg.guest_decksmith = nil
+    cfg.guest_printer   = nil
+    cfg.guest_pages     = nil
     -- seed is left for the deck selector to pick; the relay calls gen_seed()
     -- when the host never sets one.
     cfg.seed      = nil
+    cfg.guest_seed = nil
+end
+
+-- The run choices this client actually plays with. With Same Deck/Stake on
+-- (default) the host's pick is the match's pick; with it off the guest runs its
+-- own deck, stake and sleeve, and Same Seed decides whose seed it starts on.
+function WAR.LOBBY.local_choices(cfg)
+    cfg = cfg or WAR.LOBBY.config
+    local separate = cfg.same_deck == false and not WAR.LOBBY.is_host
+    local own_seed = cfg.same_seed == false and not WAR.LOBBY.is_host
+
+    local function pick(key, default)
+        -- Explicit branch, not `a and b or c`: a nil guest pick must stay nil
+        -- (and take the default) instead of falling back to the host's value.
+        local v
+        if separate then v = cfg["guest_" .. key] else v = cfg[key] end
+        if v == nil or v == "" then v = default end
+        return v
+    end
+
+    local seed
+    if own_seed then seed = cfg.guest_seed else seed = cfg.seed end
+    if seed == "" then seed = nil end
+
+    return {
+        back      = pick("back", "Red Deck"),
+        stake     = tonumber(pick("stake", 1)) or 1,
+        sleeve    = pick("sleeve", nil),
+        challenge = pick("challenge", nil),
+        seed      = seed,
+        decksmith = separate and cfg.guest_decksmith or cfg.decksmith,
+        printer   = separate and cfg.guest_printer or cfg.printer,
+        pages     = separate and cfg.guest_pages or cfg.pages,
+    }
+end
+
+-- Sends the guest's own picks so the relay can hand them back on startGame
+-- (and so a lobby that started on the guest's second choice restarts on it).
+function WAR.LOBBY.push_guest_choices()
+    if WAR.LOBBY.is_host or not WAR.LOBBY.code then return end
+    local cfg = WAR.LOBBY.config
+    WAR.NET.send({
+        action          = "guestChoices",
+        guest_back      = cfg.guest_back or "Red Deck",
+        guest_stake     = cfg.guest_stake or 1,
+        guest_challenge = cfg.guest_challenge or "",
+        guest_seed      = cfg.guest_seed or "",
+        guest_sleeve    = cfg.guest_sleeve or "",
+        guest_decksmith = cfg.guest_decksmith or "",
+        guest_printer   = cfg.guest_printer or "",
+        guest_pages     = cfg.guest_pages or "",
+    })
 end
 
 function WAR.LOBBY.create()
@@ -91,12 +156,32 @@ function WAR.LOBBY.push_config()
         back                    = cfg.back or "Red Deck",
         stake                   = cfg.stake or 1,
         sleeve                  = cfg.sleeve or "",
+        decksmith               = cfg.decksmith or "",
+        printer                 = cfg.printer or "",
+        pages                   = cfg.pages or "",
+        same_deck               = cfg.same_deck ~= false,
+        same_seed               = cfg.same_seed ~= false,
     })
 end
 
 function WAR.LOBBY.leave()
-    if WAR.UI and WAR.UI.exit_war_profile then WAR.UI.exit_war_profile() end
     WAR.NET.send({ action = "leave" })
+    WAR.LOBBY.leave_local()
+end
+
+-- Leaving a live match from the pause menu is a forfeit, not a disconnect: the
+-- relay is told at once so the opponent is not left sitting on a dead match
+-- until the socket times out.
+function WAR.LOBBY.forfeit()
+    if not WAR.GAME.active then return false end
+    WAR.NET.send({ action = "forfeit" })
+    WAR.LOBBY.leave_local()
+    return true
+end
+
+-- Local half of leaving: everything the next lobby must not inherit.
+function WAR.LOBBY.leave_local()
+    if WAR.UI and WAR.UI.exit_war_profile then WAR.UI.exit_war_profile() end
     -- keep socket open — reused by the next join/create without re-authing
     WAR.LOBBY.code    = nil
     WAR.LOBBY.is_host = false
@@ -111,6 +196,17 @@ function WAR.LOBBY.leave()
     WAR.LOBBY.config.stake                   = nil
     WAR.LOBBY.config.sleeve                  = nil
     WAR.LOBBY.config.challenge               = nil
+    WAR.LOBBY.config.decksmith               = nil
+    WAR.LOBBY.config.printer                 = nil
+    WAR.LOBBY.config.pages                   = nil
+    WAR.LOBBY.config.guest_back              = nil
+    WAR.LOBBY.config.guest_stake             = nil
+    WAR.LOBBY.config.guest_seed              = nil
+    WAR.LOBBY.config.guest_sleeve            = nil
+    WAR.LOBBY.config.guest_challenge         = nil
+    WAR.LOBBY.config.guest_decksmith         = nil
+    WAR.LOBBY.config.guest_printer           = nil
+    WAR.LOBBY.config.guest_pages             = nil
     if WAR.AVATAR then
         WAR.AVATAR._enemy_host  = "jimbo"
         WAR.AVATAR._enemy_guest = "jimbo"

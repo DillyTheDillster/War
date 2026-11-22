@@ -376,6 +376,68 @@ function WAR.GAME.timer_auto_start()
     return not (WAR.config and WAR.config.timer_auto_start == false)
 end
 
+-- Wall clock for the blind countdown. G.TIMERS.REAL is reset when a run
+-- starts, so a clock armed just before the new run would compute a negative
+-- elapsed time and display secs + the old uptime — a four-digit countdown
+-- where the round number should be. love.timer is monotonic for the process.
+function WAR.GAME.now()
+    if love and love.timer and love.timer.getTime then return love.timer.getTime() end
+    return (G.TIMERS and G.TIMERS.REAL) or 0
+end
+
+-- Seconds left on the blind clock, clamped to what the relay actually sent so
+-- a clock-source jump can never display more than the real clock.
+function WAR.GAME.timer_remaining()
+    local t = WAR.GAME._pvp_timer
+    if not t then return 0 end
+    local now = WAR.GAME.now()
+    if now < t.start then t.start = now end      -- rebased if the source reset
+    local left = math.ceil(t.secs - (now - t.start))
+    if left > t.secs then left = t.secs end
+    if left < 0 then left = 0 end
+    return left
+end
+
+-- ── Frozen time ───────────────────────────────────────────────────────────
+-- War holds the run in two places: the ready barrier (you have readied, the
+-- opponent has not) and the "waiting for opponent" overlay after a PvP blind.
+-- The overlay sets G.SETTINGS.paused, but G.TIMERS.REAL keeps advancing through
+-- both, so any modded mechanic that measures elapsed time with it — a joker
+-- that loses chips over time, a cooldown, a charge that builds — keeps ticking
+-- while the player is doing nothing but waiting. That punishes whoever readied
+-- first.
+--
+-- Mods should accumulate with WAR.GAME.mod_dt(dt) instead of raw dt, or compare
+-- against WAR.GAME.run_time() instead of G.TIMERS.REAL (both freeze here).
+-- War's own gamemode/ruleset update hooks already receive mod_dt.
+function WAR.GAME.wait_frozen()
+    if not WAR.GAME.active then return false end
+    -- Readied up, waiting on the opponent's barrier click.
+    if WAR.GAME._pending_blind_e ~= nil then return true end
+    -- Sitting on a rival blind's select screen: the round has not started yet,
+    -- so the run is not running. G.GAME.blind does not exist until the blind
+    -- is entered, so the boss on offer has to be looked up by choice.
+    if G.STATE and G.STATES and G.STATE == G.STATES.BLIND_SELECT then
+        local rr  = G.GAME and G.GAME.round_resets
+        local key = rr and rr.blind_choices and rr.blind_choices.Boss
+        return WAR.is_rival_blind(key and G.P_BLINDS and G.P_BLINDS[key])
+    end
+    return false
+end
+
+-- dt as a modded mechanic should see it: 0 while the run is held.
+function WAR.GAME.mod_dt(dt)
+    if WAR.GAME.wait_frozen() then return 0 end
+    if G.SETTINGS and G.SETTINGS.paused then return 0 end
+    return dt or 0
+end
+
+-- Run time that ignores waits and pauses. Same units as G.TIMERS.REAL, but it
+-- stops while the run is held, so elapsed-time comparisons stay fair.
+function WAR.GAME.run_time()
+    return WAR.GAME._run_time or 0
+end
+
 -- Blind clock is the relay's: it tells both clients how long is left, so the two
 -- countdowns can't disagree.
 function WAR.GAME.start_pvp_timer(secs, is_mine, paused)
@@ -383,7 +445,7 @@ function WAR.GAME.start_pvp_timer(secs, is_mine, paused)
     local prev = WAR.GAME._pvp_timer
     local orig = prev and prev._orig_round
     WAR.GAME._pvp_timer = {
-        start             = (G.TIMERS and G.TIMERS.REAL) or 0,
+        start             = WAR.GAME.now(),
         secs              = secs,
         is_mine           = is_mine or false,
         paused            = paused  or false,

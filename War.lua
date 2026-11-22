@@ -12,7 +12,7 @@ WAR.ROOT = WAR.path
 WAR.console_log = 0
 
 -- Set to 1 to connect to the beta relay (port 7778) instead of the live server.
-WAR.beta_test = 0
+WAR.beta_test = 1
 
 function WAR.log(...)
     if WAR.console_log == 1 then print(...) end
@@ -22,12 +22,12 @@ function WAR.load(path)
     return SMODS.load_file(path)()
 end
 
-function WAR.load_dir(dir)
+function WAR.load_dir(dir, skip)
     local init = dir .. "/_init.lua"
     local ok = SMODS.load_file(init)
     if ok then ok() end
     for _, f in ipairs(NFS.getDirectoryItems(WAR.ROOT .. dir)) do
-        if f:match("%.lua$") and f ~= "_init.lua" then
+        if f:match("%.lua$") and f ~= "_init.lua" and not (skip and skip[f]) then
             SMODS.load_file(dir .. "/" .. f)()
         end
     end
@@ -67,6 +67,7 @@ WAR.load("ui/screens.lua")
 WAR.load("ui/icon_select.lua")
 WAR.load("ui/hud.lua")
 WAR.load("ui/popups.lua")
+WAR.load("ui/challenges.lua")
 WAR.load("ui/lobby.lua")
 
 -- TEMPORARY
@@ -75,4 +76,9 @@ WAR.load("ui/temp/account.lua") -- Still working on account pages, then will mov
 -- WAR.load("ui/temp/config.lua") -- moved to ui/config.lua (permanent change)
 -- WAR.load("ui/temp/icon_select.lua")
 
-WAR.load_dir("compat")
+-- Compat modules that are kept on disk but not loaded. Add a filename to mute
+-- it for a test run; remove the line to load it again.
+WAR.COMPAT_SKIP = {
+}
+
+WAR.load_dir("compat", WAR.COMPAT_SKIP)

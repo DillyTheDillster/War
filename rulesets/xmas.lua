@@ -13,9 +13,38 @@ WAR.RULESETS["xmas"] = {
     -- jokers have special colours to show their rarity (mayb i'll add ui)
 }
 
+-- The Soul's own sprite in the wrap atlas: row 1, x=3 (the free slot next to
+-- the tarot/planet/spectral wraps).
+local SOUL_SPRITE_POS = { x = 3, y = 1 }
+
+-- Steamodded draws the shared soul sprite in its own draw step ('soul', from
+-- src/card_draw.lua), not in vanilla's card draw — patching card.lua does
+-- nothing on a SMODS install. Wrap the step instead: a wrapped Soul draws the
+-- wrap-atlas sprite below and must not draw the vanilla one as well.
+local soul_step_muted = false
+local function mute_shared_soul_step()
+    if soul_step_muted then return end
+    local steps = SMODS and SMODS.DrawSteps
+    if type(steps) ~= 'table' then return end
+    for _, step in pairs(steps) do
+        if type(step) == 'table' and step.key == 'soul' and type(step.func) == 'function' then
+            local step_func = step.func
+            step.func = function(card, ...)
+                if card._war_xmas_soul then return end
+                return step_func(card, ...)
+            end
+            soul_step_muted = true
+        end
+    end
+end
+mute_shared_soul_step()
+
 -- True when this card lives in a shop/pack area and should appear gift-wrapped.
 -- Uses card.area (set in the update loop) so it's always current for hover checks.
 local function is_wrapped(card)
+    -- Debug override (DebugPlus `war wrap`): force the wrap anywhere, so the
+    -- sprites can be checked without waiting for a real shop roll.
+    if card._war_xmas_force then return true end
     if not (WAR.GAME and WAR.GAME.active) then return false end
     if WAR.LOBBY.config.ruleset ~= 'xmas' then return false end
     local area = card.area
@@ -71,6 +100,17 @@ local function wrap_sprites(card)
     center.scale_mag = math.min(wrap_atlas.px / G.CARD_W, wrap_atlas.py / G.CARD_H)
     center:set_sprite_pos({ x = x, y = y })
 
+    -- The Soul has to stay recognisable inside a wrap, and its sprite lives in
+    -- the wrap atlas too (row 1, x=3). Only the wrapped copy gets it — the same
+    -- card unwrapped keeps vanilla's soul rendering.
+    if card.config and card.config.center and card.config.center.key == 'c_soul' then
+        local soul = Sprite(0, 0, G.CARD_W, G.CARD_H, wrap_atlas, SOUL_SPRITE_POS)
+        soul.role.draw_major  = card
+        soul.states.hover.can = false
+        soul.states.click.can = false
+        card._war_xmas_soul   = soul
+    end
+
     -- Force layout dimensions to standard card size so the buy/select button and
     -- collider always sit at the right position regardless of the joker's actual size.
     -- VT is locked to match in the DrawStep each frame.
@@ -87,6 +127,11 @@ local function unwrap_sprites(card)
     local center = card.children.center
     local o      = card._war_xmas_orig
     if not center or not o then card._war_xmas_wrapped = nil; return end
+
+    if card._war_xmas_soul then
+        card._war_xmas_soul:remove()
+        card._war_xmas_soul = nil
+    end
 
     center.atlas     = o.atlas
     center.scale.x   = o.scale_x
@@ -202,6 +247,9 @@ SMODS.DrawStep {
     key   = 'war_xmas_pre',
     order = -1001,
     func  = function(self)
+        -- Cheap once it has landed; retried here in case Steamodded registered
+        -- its soul step after this file loaded.
+        mute_shared_soul_step()
         if is_wrapped(self) then
             wrap_sprites(self)
             -- Lock visual size to standard card dimensions every render frame.
@@ -212,5 +260,42 @@ SMODS.DrawStep {
         else
             unwrap_sprites(self)
         end
+    end,
+}
+
+-- Debug entry points behind the DebugPlus `war wrap` / `war unwrap` console
+-- commands (compat/debugplus.lua). The force flag makes is_wrapped() true for
+-- any card, so a card in hand or in the collection can be wrapped for a look.
+WAR.RULESETS['xmas'].wrap_card = function(card)
+    if type(card) ~= 'table' or not card.children or not card.config then return false end
+    card._war_xmas_force = true
+    wrap_sprites(card)
+    return true
+end
+
+WAR.RULESETS['xmas'].unwrap_card = function(card)
+    if type(card) ~= 'table' or not card.children then return false end
+    card._war_xmas_force = nil
+    unwrap_sprites(card)
+    return true
+end
+
+-- Drawn after the card centre (-10) so the soul sits on top of the wrap, using
+-- the same dissolve pass vanilla gives a soul_pos sprite. Nothing is drawn when
+-- the card is not wrapped: a wrapped Soul loses its art to the gift wrap, and
+-- that is the only place this sprite belongs. While it is set, lovely/war.toml
+-- also suppresses vanilla's shared-soul pass for that card, so the wrapped Soul
+-- shows this sprite and not the vanilla one.
+SMODS.DrawStep {
+    key   = 'war_xmas_soul',
+    order = -9,
+    func  = function(self)
+        local soul = self._war_xmas_soul
+        if not soul or not self.children.center then return end
+        local scale_mod  = 0.07 + 0.02*math.sin(1.8*G.TIMERS.REAL)
+        local rotate_mod = 0.05*math.sin(1.219*G.TIMERS.REAL)
+        soul:draw_shader('dissolve', 0, nil, nil, self.children.center, scale_mod, rotate_mod, nil,
+                         0.1 + 0.03*math.sin(1.8*G.TIMERS.REAL), nil, 0.6)
+        soul:draw_shader('dissolve', nil, nil, nil, self.children.center, scale_mod, rotate_mod)
     end,
 }

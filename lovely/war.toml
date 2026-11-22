@@ -126,6 +126,18 @@ match_indent = true
 payload      = "restart = not (WAR and WAR.GAME and WAR.GAME.active) and UIBox_button{id = 'restart_button', label = {localize('b_start_new_run')}, button = \"setup_run\", minw = 5} or nil"
 times        = 1
 
+# A live match cannot be "left" without telling the other player, so the pause
+# menu's Main Menu is a forfeit while one is running (core/game_hooks.lua sends
+# the forfeit to the relay before the menu transition).
+[[patches]]
+[patches.pattern]
+target       = "functions/UI_definitions.lua"
+pattern      = '''main_menu = UIBox_button{ label = {localize('b_main_menu')}, button = "go_to_menu", minw = 5}'''
+position     = "at"
+match_indent = true
+payload      = '''main_menu = UIBox_button{ label = {localize((WAR and WAR.GAME and WAR.GAME.active) and 'war_forfeit' or 'b_main_menu')}, button = "go_to_menu", minw = 5}'''
+times        = 1
+
 # When a deck starts with a specific consumable (e.g. Ghost Deck → c_hex) and
 # that consumable is banned, create_card falls back to the _type argument which
 # vanilla hard-codes as 'Tarot'. Instead use the actual set of the banned card
@@ -153,18 +165,13 @@ match_indent = true
 payload      = "{n=G.UIT.R, config={align = \"cm\", r = 0.1, minw = 1.2, colour = temp_col2, id = 'row_round_text', button = 'war_timer_toggle'}, nodes={"
 times        = 1
 
-# In the tag collection, apply the debuff shader on top of any tag that is
-# banned for the current run (weeworld and any ruleset using banned_keys).
-[[patches]]
-[patches.pattern]
-target       = "functions/UI_definitions.lua"
-pattern      = "local temp_tag_ui, temp_tag_sprite = temp_tag:generate_UI()"
-position     = "after"
-match_indent = true
-payload      = '''if G.GAME and G.GAME.banned_keys and G.GAME.banned_keys[v.key] then
-        temp_tag_sprite:define_draw_steps({{shader='dissolve',shadow_height=0.05},{shader='debuff'}})
-    end'''
-times        = 1
+# NOTE: the original lovely patch for tag-collection debuffing (which targeted
+# "local temp_tag_ui, temp_tag_sprite = temp_tag:generate_UI()" in
+# UI_definitions.lua) has been removed.  SMODS completely replaces
+# create_UIBox_your_collection_tags at runtime, so that call site is never
+# reached and the patch is dead.  The equivalent logic now lives in
+# core/game_hooks.lua as a Tag:generate_UI wrap that fires regardless of which
+# collection function renders the tags.
 
 # banned_keys only culls the pools, so anything that hands out a tag by name
 # (Diet Cola and Anaglyph Deck hard-code Double Tag; a modded card can name any

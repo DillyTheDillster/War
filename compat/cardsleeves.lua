@@ -7,6 +7,11 @@ if not (SMODS.Mods and SMODS.Mods["CardSleeves"]) then return end
 
 WAR.COMPAT = WAR.COMPAT or {}
 
+-- The sleeve is handled here (it also has to draw over the lobby panel's deck
+-- card), so the generic page sync leaves it alone.
+WAR.COMPAT.CLAIMED_PAGES = WAR.COMPAT.CLAIMED_PAGES or {}
+WAR.COMPAT.CLAIMED_PAGES.casl_sleeve_choice = true
+
 -- Called from lobby.lua's start_run intercept to read the chosen sleeve.
 -- Returns the sleeve key string, or nil if none / the blank slot was chosen.
 function WAR.COMPAT.capture_sleeve(args)

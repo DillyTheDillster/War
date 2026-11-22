@@ -78,6 +78,9 @@ function WAR.SYNC.tick()
             if WAR.UI.on_joined_as_guest then
                 WAR.UI.on_joined_as_guest(m.host_username, m.code)
             end
+            -- The relay needs the guest's own picks before a match can start on
+            -- separate decks/seeds (harmless while Same Deck/Stake is on).
+            if WAR.LOBBY.push_guest_choices then WAR.LOBBY.push_guest_choices() end
 
         elseif a == "guest_joined" then
             WAR.LOBBY.peer_version = m.mod_version
@@ -145,9 +148,25 @@ function WAR.SYNC.tick()
             if WAR.UI.update_lobby_status then WAR.UI.update_lobby_status() end
 
         elseif a == "stopGame" then
+            -- cause=forfeit when the other player left through the pause
+            -- menu, so the message says what actually happened.
+            local forfeited = (m.cause == "forfeit")
             if WAR.GAME.active then
-                WAR.SYNC.on_stop_game(localize('war_opp_left'))
+                WAR.SYNC.on_stop_game(forfeited and localize('war_opp_forfeit')
+                                               or localize('war_opp_left'))
+                -- Walking away hands the match to the one who stayed: run the
+                -- same win-side unlocks a played-out win would. on_stop_game
+                -- has already restored the player's own profile by now.
+                if forfeited and check_for_unlock then
+                    check_for_unlock({ type = 'war_win' })
+                end
             end
+            -- The relay closes the lobby on every path that sends stopGame
+            -- (forfeit, mid-game leave, mid-game drop) but keeps this socket
+            -- open, so the local half has to be dropped here. A mid-game drop
+            -- sends peer_left first, which is why this is not gated on
+            -- GAME.active — by then on_stop_game has already run once.
+            WAR.SYNC.on_lobby_closed()
 
         elseif a == "error" then
             WAR.UI.show_message(WAR.error_text(m.reason))
@@ -172,6 +191,17 @@ function WAR.SYNC.tick()
             if m.stake     then WAR.LOBBY.config.stake     = tonumber(m.stake) end
             if m.challenge then WAR.LOBBY.config.challenge = m.challenge end
             if m.sleeve    ~= nil then WAR.LOBBY.config.sleeve = (m.sleeve ~= "") and m.sleeve or nil end
+            if m.printer   ~= nil then WAR.LOBBY.config.printer = (m.printer ~= "") and m.printer or nil end
+            -- Only a table counts: the host sends "" to clear a deck it is no
+            -- longer running, and anything else is not ours to trust here.
+            if m.decksmith ~= nil then
+                WAR.LOBBY.config.decksmith = (type(m.decksmith) == "table") and m.decksmith or nil
+            end
+            if m.pages     ~= nil then
+                WAR.LOBBY.config.pages = (type(m.pages) == "table") and m.pages or nil
+            end
+            if m.same_deck ~= nil then WAR.LOBBY.config.same_deck = m.same_deck == true end
+            if m.same_seed ~= nil then WAR.LOBBY.config.same_seed = m.same_seed == true end
             if m.pvp_start_ante then
                 WAR.LOBBY.config.pvp_start_ante = tonumber(m.pvp_start_ante)
             end
@@ -181,6 +211,27 @@ function WAR.SYNC.tick()
             if m.pvp_boss_effects        ~= nil then WAR.LOBBY.config.pvp_boss_effects        = m.pvp_boss_effects        end
             if m.weeworld_showman        ~= nil then WAR.LOBBY.config.weeworld_showman        = m.weeworld_showman        end
             if m.timer_seconds           ~= nil then WAR.LOBBY.config.timer_seconds           = tonumber(m.timer_seconds) or 0 end
+            if WAR.UI.update_deck_info then WAR.UI.update_deck_info() end
+            if WAR.UI.create_lobby_panels then WAR.UI.create_lobby_panels() end
+
+        -- The guest's own run choices, echoed by the relay so the host's panel
+        -- shows what the other player is bringing to the match.
+        elseif a == "guestChoices" then
+            local cfg = WAR.LOBBY.config
+            if m.guest_back      ~= nil then cfg.guest_back      = m.guest_back end
+            if m.guest_stake     ~= nil then cfg.guest_stake     = tonumber(m.guest_stake) or 1 end
+            if m.guest_seed      ~= nil then cfg.guest_seed      = (m.guest_seed ~= "") and m.guest_seed or nil end
+            if m.guest_sleeve    ~= nil then cfg.guest_sleeve    = (m.guest_sleeve ~= "") and m.guest_sleeve or nil end
+            if m.guest_challenge ~= nil then cfg.guest_challenge = (m.guest_challenge ~= "") and m.guest_challenge or nil end
+            if m.guest_decksmith ~= nil then
+                cfg.guest_decksmith = (type(m.guest_decksmith) == "table") and m.guest_decksmith or nil
+            end
+            if m.guest_printer   ~= nil then
+                cfg.guest_printer = (m.guest_printer ~= "") and m.guest_printer or nil
+            end
+            if m.guest_pages     ~= nil then
+                cfg.guest_pages = (type(m.guest_pages) == "table") and m.guest_pages or nil
+            end
             if WAR.UI.update_deck_info then WAR.UI.update_deck_info() end
             if WAR.UI.create_lobby_panels then WAR.UI.create_lobby_panels() end
 
@@ -336,6 +387,27 @@ function WAR.SYNC.on_start_game(m)
     if m.stake     then WAR.LOBBY.config.stake     = tonumber(m.stake) end
     if m.challenge then WAR.LOBBY.config.challenge = m.challenge end
     if m.sleeve    ~= nil then WAR.LOBBY.config.sleeve = (m.sleeve ~= "") and m.sleeve or nil end
+    if m.decksmith ~= nil then
+        WAR.LOBBY.config.decksmith = (type(m.decksmith) == "table") and m.decksmith or nil
+    end
+    if m.printer   ~= nil then
+        WAR.LOBBY.config.printer = (type(m.printer) == "string" and m.printer ~= "") and m.printer or nil
+    end
+    if m.pages     ~= nil then
+        WAR.LOBBY.config.pages = (type(m.pages) == "table") and m.pages or nil
+    end
+
+    -- What this client actually plays with. The relay decides it (the host's
+    -- choices, or this client's own when the lobby allows separate decks and
+    -- seeds), so it is read off the message instead of recomputed from the
+    -- lobby config, and a mid-match restart replays exactly this.
+    WAR.GAME.local_run = {
+        back      = m.back or "Red Deck",
+        stake     = tonumber(m.stake) or 1,
+        seed      = m.seed,
+        sleeve    = (m.sleeve ~= nil and m.sleeve ~= "") and m.sleeve or nil,
+        challenge = m.challenge,
+    }
 
     if G.OVERLAY_MENU then G.FUNCS.exit_overlay_menu() end
     WAR.UI.hide_lobby()
@@ -345,24 +417,69 @@ function WAR.SYNC.on_start_game(m)
     -- sleeve would draw their locked art even though the run uses them.
     if WAR.UI.enter_war_profile then WAR.UI.enter_war_profile() end
 
+    -- Modded decks (Decksmith custom deck, Revo's Vault printer pick): rebuild
+    -- them before the run is built. Both clients come through here, so the data
+    -- is installed from the same source rather than from local leftovers. A
+    -- guest that cannot rebuild it — no mod, unreadable payload, or a relay
+    -- that never carried it — would otherwise run a different deck from the
+    -- same relay data, so the match stops instead.
+    -- Run-select pages (compat/runselect.lua) are the opposite: they never stop
+    -- a match. A page this install does not have is logged and both clients
+    -- play on.
+    local compat_err = nil
+    if WAR.COMPAT then
+        for _, entry in ipairs({
+            { WAR.COMPAT.apply_decksmith, m.decksmith },
+            { WAR.COMPAT.apply_printer,   m.printer   },
+            { WAR.COMPAT.apply_pages,     m.pages     },
+        }) do
+            local apply, payload = entry[1], entry[2]
+            if type(apply) == "function" then
+                local ok, err = apply(payload, m.back)
+                if not ok then compat_err = err end
+            end
+        end
+    end
+    if compat_err and not WAR.LOBBY.is_host then
+        WAR.log("[WAR COMPAT] cannot start this match: " .. tostring(compat_err))
+        WAR.UI.show_message(localize(compat_err))
+        WAR.LOBBY.leave()
+        return
+    end
+
     -- vanilla start_run wants the challenge object, not its id: it reads
     -- args.challenge.deck / .jokers / .rules when building the run.
     local challenge = WAR.challenge_by_id(m.challenge)
+    -- A challenge can run on a deck picked on the challenge screen. That deck
+    -- wins over the challenge's own `deck`, which is what game.lua reads first,
+    -- so hand start_run a copy with `deck` cleared (false, so the metatable
+    -- fallback can't hand the original back) and let args.back drive it.
+    if challenge and m.back and m.back ~= "Challenge Deck" then
+        local ch = {}
+        for k, v in pairs(challenge) do ch[k] = v end
+        local mt = getmetatable(challenge)
+        if mt then setmetatable(ch, mt) end
+        ch.deck = false
+        challenge = ch
+    end
 
     local params = {
-        seed      = m.seed,
-        stake     = tonumber(m.stake) or 1,
-        back      = m.back,
+        seed      = WAR.GAME.local_run.seed,
+        stake     = WAR.GAME.local_run.stake,
+        back      = WAR.GAME.local_run.back,
         challenge = challenge,
     }
     -- CardSleeves reads the sleeve off the run args while init_game_object
     -- builds G.GAME; without this the run starts sleeveless even though the
-    -- lobby panel showed one.
-    if WAR.LOBBY.config.sleeve then
-        params.casl_sleeve_choice = WAR.LOBBY.config.sleeve
-    end
+    -- lobby panel showed one. Always set casl_sleeve_choice — even when the
+    -- relay-authoritative sleeve is nil — so CardSleeves cannot fall back to
+    -- G.viewed_sleeve, which may still hold a stale value from a deck browse
+    -- the guest did while same_deck was temporarily toggled off.
+    params.casl_sleeve_choice = WAR.GAME.local_run.sleeve or "sleeve_casl_none"
 
     -- Short pause so UI finishes closing, then wipe-transition into the run
+    -- A new match starts a fresh run clock for mods that measure elapsed play.
+    WAR.GAME._run_time = 0
     G.E_MANAGER:add_event(Event({
         trigger   = "after",
         delay     = 0.1,
@@ -398,6 +515,15 @@ function WAR.SYNC.on_start_game(m)
 end
 
 function WAR.SYNC.on_start_blind(m)
+    -- A duplicate startBlind (relay resync after a re-sent ready, or a replayed
+    -- message) must not reset a blind that is already being played: it would
+    -- wipe the score/hand state and stop the clock mid-round.
+    if WAR.GAME.is_pvp_blind and G.STATE and G.STATES
+       and G.STATE ~= G.STATES.BLIND_SELECT then
+        WAR.log("[WAR] on_start_blind: a PvP blind is already live, duplicate ignored")
+        return
+    end
+    WAR.GAME._start_blind_pending = nil
     local hands = (G.GAME.round_resets and G.GAME.round_resets.hands) or 4
     WAR.GAME.enemy_score         = 0
     WAR.GAME.enemy_score_display = 0
@@ -449,8 +575,52 @@ function WAR.SYNC.on_start_blind(m)
         -- pcall so _blind_starting is always reset even if select_blind errors.
         local ok, err = pcall(G.FUNCS.select_blind, e)
         if not ok then WAR.log("[WAR] on_start_blind select_blind error: " .. tostring(err)) end
+    else
+        -- The message beat the select screen (mid-transition, or a reconnect).
+        -- Dropping it left the relay in the blind and the client on the barrier
+        -- forever, so retry from the tick while the button is still to come.
+        WAR.GAME._start_blind_pending = WAR.GAME.now()
+        WAR.log("[WAR] on_start_blind: select button not up yet, will retry")
     end
     WAR.GAME._blind_starting = false
+end
+
+-- startBlind can arrive a beat before the select screen exists. Retry the entry
+-- for a few seconds instead of leaving the client stuck on the barrier.
+function WAR.SYNC.retry_pending_start()
+    local at = WAR.GAME._start_blind_pending
+    if not at then return end
+    if WAR.GAME.now() - at > 5 then
+        WAR.GAME._start_blind_pending = nil
+        WAR.log("[WAR] startBlind: blind select never appeared, gave up")
+        return
+    end
+    local opts = G.blind_select_opts and G.blind_select_opts.boss
+    local btn  = opts and opts.get_UIE_by_ID and opts:get_UIE_by_ID('select_blind_button')
+    if not btn then return end
+    WAR.GAME._start_blind_pending = nil
+    -- _blind_starting makes the select_blind hook pass through to vanilla
+    -- instead of treating this as a fresh ready-up.
+    WAR.GAME._blind_starting = true
+    local ok, err = pcall(G.FUNCS.select_blind, btn)
+    WAR.GAME._blind_starting = false
+    if not ok then WAR.log("[WAR] deferred select_blind error: " .. tostring(err)) end
+end
+
+-- A readyBlind that never draws startBlind leaves the button on "Readied!" and
+-- the hook ignores repeat clicks, so nothing can retry: the opponent waits on
+-- the barrier forever. Re-ask on a slow interval — the relay ignores a repeat
+-- ready for a blind that already started and answers with startBlind, so this
+-- can never start a second blind.
+function WAR.SYNC.maybe_resend_ready()
+    if not (WAR.GAME.active and WAR.GAME._pending_blind_e) then return end
+    local now = WAR.GAME.now()
+    if now - (WAR.GAME._ready_sent_at or 0) < 8 then return end
+    WAR.GAME._ready_resends = (WAR.GAME._ready_resends or 0) + 1
+    if WAR.GAME._ready_resends > 4 then return end
+    WAR.GAME._ready_sent_at = now
+    WAR.log("[WAR] no startBlind yet, re-sending readyBlind #" .. WAR.GAME._ready_resends)
+    WAR.NET.send({ action = "readyBlind", skips = (G.GAME and G.GAME.skips) or 0 })
 end
 
 function WAR.SYNC.on_enemy_info(m)
@@ -538,6 +708,20 @@ function WAR.SYNC.on_stop_game(msg)
     if G.STAGE ~= G.STAGES.MAIN_MENU then
         G.FUNCS.go_to_menu()
     end
+end
+
+-- The relay has closed the lobby under us: the opponent forfaited, left, or
+-- dropped mid-match. Nothing is left to relay to, so drop everything the dead
+-- match left running — the same way leaving the end screen does (see
+-- G.FUNCS.war_end_to_menu). Without this the main menu keeps the dead code,
+-- still reads as connected, and the blind clock keeps counting into G.GAME.round.
+function WAR.SYNC.on_lobby_closed()
+    if WAR.GAME.stop_pvp_timer then WAR.GAME.stop_pvp_timer() end
+    if WAR.LOBBY.code or WAR.LOBBY_STATE ~= "none" then
+        WAR.LOBBY.leave_local()
+        if WAR.UI.hide_lobby then WAR.UI.hide_lobby() end
+    end
+    if WAR.UI.update_connection_status then WAR.UI.update_connection_status() end
 end
 
 function WAR.SYNC.my_username()

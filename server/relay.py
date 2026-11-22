@@ -430,6 +430,7 @@ def new_game_state():
         '_skip_timer_bonus':       0,
         '_in_pvp_blind':           False,
         '_first_ready_at':         None,
+        '_blind_fired':            False,
         '_host_best':              0.0,
         '_guest_best':             0.0,
     }
@@ -609,6 +610,12 @@ async def award_stat_achievements(writer, uid, uname):
             await send(writer, {'action': 'achievementUnlocked', 'key': ACHIEVEMENT_ICONS[key]})
 
 async def handle_record_result(lobby, winner_role):
+    # One row per lobby. A forfeit can arrive after the match already ended
+    # (last life lost to the timer, final round), and a second insert would
+    # hand both players an extra win/loss.
+    if lobby.get('_result_recorded'):
+        return {}
+    lobby['_result_recorded'] = True
     gm      = lobby.get('gamemode', 'vanilla')
     results = {}
     for role in ('host', 'guest'):
@@ -655,6 +662,36 @@ async def handle_record_result(lobby, winner_role):
             await award_stat_achievements(w, uid, uname)
     log.info(f"match over lobby={lobby.get('_code','?')} winner={winner_role}")
     return results
+
+async def end_match(lobby, winner_role):
+    """The one way a match ends.
+
+    Every path that can drop a player to zero lives (blind clock, failed round,
+    PvP resolution) goes through here, because more than one of them can fire
+    for the same death — a player can fail a blind while the clock for the next
+    one is still running. `handle_record_result` already refuses a second DB
+    row, but the win/loseGame sends used to sit outside that guard, so the
+    loser got a second end screen on top of the first.
+
+    Also stops the blind clock: it is "hurry up and ready the next blind", and
+    there is no next blind for a match that just ended.
+    """
+    if lobby.get('_result_recorded'):
+        return
+    task = lobby.pop('_blind_timer_task', None)
+    # Not when we *are* that task (timer expiry calls this): cancelling the
+    # running task would throw CancelledError into the awaits below and skip
+    # the end-screen sends entirely.
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+    _clear_timer_pause(lobby)
+    lobby['is_in_game'] = False
+    score_results = await handle_record_result(lobby, winner_role)
+    winner_msg, loser_msg = _make_gameover_msgs(lobby, winner_role, score_results)
+    winner_w = lobby.get(winner_role)
+    loser_w  = lobby.get(get_enemy_role(winner_role))
+    if winner_w: await send(winner_w, winner_msg)
+    if loser_w:  await send(loser_w,  loser_msg)
 
 # lobby management
 
@@ -778,6 +815,7 @@ async def reset_per_blind(lobby):
     _clear_timer_pause(lobby)
     lobby['host_ready_blind']        = False
     lobby['guest_ready_blind']       = False
+    lobby['_blind_fired']            = False
     lobby['host_first_ready']        = False
     lobby['guest_first_ready']       = False
     lobby['host_played_this_blind']  = 0
@@ -805,13 +843,30 @@ async def handle_start_game(lobby, role, msg):
 
     opts  = lobby['options']
     lives = int(opts.get('lives', 4))
-    seed  = opts.get('seed') or gen_seed()
-    back      = opts.get('back')
-    stake     = opts.get('stake', 1)
-    challenge = opts.get('challenge', '')
-    sleeve    = opts.get('sleeve', '')
 
-    lobby['seed'] = seed
+    # Same Deck/Stake (default on): the host's run choices are the match's run
+    # choices. Off: each player runs their own deck, stake, sleeve and compat
+    # payloads, which the guest sends through 'guestChoices'.
+    # Same Seed (default on): one seed for the match. Off: the guest gets its
+    # own, either the one it typed or a fresh random one.
+    same_deck = opts.get('same_deck', True) is not False
+    same_seed = opts.get('same_seed', True) is not False
+
+    host_seed  = opts.get('seed') or gen_seed()
+    guest_seed = host_seed
+    if not same_seed:
+        guest_seed = opts.get('guest_seed') or gen_seed()
+
+    def pick(for_guest, key, default=None):
+        if for_guest and not same_deck:
+            v = opts.get('guest_' + key)
+            if v is not None:
+                return v
+        v = opts.get(key)
+        return default if v is None else v
+
+    lobby['seed']       = host_seed
+    lobby['guest_seed'] = guest_seed
     lobby['is_in_game'] = True
 
     # Reset all game state
@@ -819,22 +874,55 @@ async def handle_start_game(lobby, role, msg):
     state['host_lives']  = lives
     state['guest_lives'] = lives
     state['is_in_game']  = True
-    state['seed']        = seed
+    state['seed']        = host_seed
     for k, v in state.items():
         lobby[k] = v
+    lobby['guest_seed'] = guest_seed
+    # A fresh match can record its own result even if this lobby object already
+    # played one out.
+    lobby['_result_recorded'] = False
 
-    await broadcast(lobby, {
-        'action':    'startGame',
-        'seed':      seed,
-        'lives':     lives,
-        'back':      back,
-        'stake':     stake,
-        'challenge': challenge,
-        'sleeve':    sleeve,
+    common  = {'action': 'startGame', 'lives': lives}
+    host_w  = lobby.get('host')
+    guest_w = lobby.get('guest')
+
+    if host_w: await send(host_w, {
+        **common,
+        'seed':      host_seed,
+        'back':      pick(False, 'back', 'Red Deck'),
+        'stake':     pick(False, 'stake', 1),
+        'challenge': pick(False, 'challenge'),
+        'sleeve':    pick(False, 'sleeve'),
+        # Decksmith deck spec / Revo's Vault printer pick (nested tables or a
+        # key string) — forwarded verbatim, the clients validate them.
+        'decksmith': pick(False, 'decksmith'),
+        'printer':   pick(False, 'printer'),
+        # Modded run-select pages (compat/runselect.lua): a key -> pick map.
+        'pages':     pick(False, 'pages'),
     })
-    log.info(f"lobby {lobby['_code']} startGame seed={seed} lives={lives}")
+    if guest_w: await send(guest_w, {
+        **common,
+        'seed':      guest_seed,
+        'back':      pick(True, 'back', 'Red Deck'),
+        'stake':     pick(True, 'stake', 1),
+        'challenge': pick(True, 'challenge'),
+        'sleeve':    pick(True, 'sleeve'),
+        'decksmith': pick(True, 'decksmith'),
+        'printer':   pick(True, 'printer'),
+        'pages':     pick(True, 'pages'),
+    })
+    log.info(f"lobby {lobby['_code']} startGame seed={host_seed} "
+             f"guest_seed={guest_seed} lives={lives} same_deck={same_deck} "
+             f"same_seed={same_seed}")
 
 async def _fire_start_blind(lobby):
+    # One startBlind per blind. A stray repeat ready (a rebuilt select button,
+    # a client re-sending after a dropped socket) used to fire a second one
+    # mid-blind, which reset the live round on the client that received it.
+    if lobby.get('_blind_fired'):
+        return
+    lobby['_blind_fired'] = True
+
     first = None
     if lobby.get('host_first_ready'):    first = 'host'
     elif lobby.get('guest_first_ready'): first = 'guest'
@@ -876,15 +964,10 @@ async def _blind_timer_coro(lobby, late_role, secs):
             return  # second player readied just in time
         await lose_life(lobby, late_role, cause='timer')
         log.info(f"lobby {lobby['_code']} blind timer: {late_role} lost a life ({lobby.get(f'{late_role}_lives', 0)} remaining)")
-        # If that life was the last one, end the game now
+        # If that life was the last one, end the game now (end_match refuses a
+        # second send if the match already ended some other way).
         if lobby.get(f'{late_role}_lives', 1) <= 0:
-            winner_role   = get_enemy_role(late_role)
-            score_results = await handle_record_result(lobby, winner_role)
-            winner_msg, loser_msg = _make_gameover_msgs(lobby, winner_role, score_results)
-            winner_w = lobby.get(winner_role)
-            loser_w  = lobby.get(late_role)
-            if winner_w: await send(winner_w, winner_msg)
-            if loser_w:  await send(loser_w,  loser_msg)
+            await end_match(lobby, get_enemy_role(late_role))
     except asyncio.CancelledError:
         pass
     finally:
@@ -928,6 +1011,8 @@ async def handle_resume_timer(lobby, role, msg):
     if remaining <= 0:
         await lose_life(lobby, late_role, cause='timer')
         await _broadcast_blind_timer(lobby, 0)
+        if lobby.get(f'{late_role}_lives', 1) <= 0:
+            await end_match(lobby, get_enemy_role(late_role))
         return
     # Reset elapsed-time tracking so a subsequent pause computes correctly.
     lobby['_timer_start'] = time.time()
@@ -939,6 +1024,7 @@ async def handle_resume_timer(lobby, role, msg):
     await _broadcast_blind_timer(lobby, math.ceil(remaining), late_role)
 
 async def handle_ready_blind(lobby, role, msg):
+    already = lobby.get(f'{role}_ready_blind')
     lobby[f'{role}_ready_blind'] = True
 
     # Pick up any skips that happened on the blind immediately before this one
@@ -964,6 +1050,14 @@ async def handle_ready_blind(lobby, role, msg):
         lobby['_first_ready_at'] = time.time()
 
     if lobby['host_ready_blind'] and lobby['guest_ready_blind']:
+        if lobby.get('_blind_fired'):
+            # The blind already started and this client readied again — it
+            # missed the startBlind broadcast (dropped socket, reconnect).
+            # Re-send it to that client only; the opponent is already playing.
+            w = lobby.get(role)
+            if w:
+                await send(w, {'action': 'startBlind'})
+            return
         # Both ready: cancel any pending timer and start the blind
         task = lobby.pop('_blind_timer_task', None)
         if task and not task.done():
@@ -974,6 +1068,12 @@ async def handle_ready_blind(lobby, role, msg):
         await _fire_start_blind(lobby)
     else:
         # One player ready: start timer if configured
+        if already:
+            # A repeat ready (client recovery, UI quirk). Answering it with a
+            # fresh clock would restart the opponent's countdown, so the second
+            # half of this branch is skipped for it.
+            return
+        lobby[f'{role}_ready_blind'] = True
         enemy_role = get_enemy_role(role)
         timer_secs = int(lobby['options'].get('timer_seconds', 0) or 0)
         # Skips only buy time once. The clock is stretched for the skips logged
@@ -1146,12 +1246,7 @@ async def resolve_pvp(lobby):
     await lose_life(lobby, loser_role, 'round')
 
     if lobby[f'{loser_role}_lives'] <= 0:
-        score_results = await handle_record_result(lobby, winner_role)
-        winner_msg, loser_msg = _make_gameover_msgs(lobby, winner_role, score_results)
-        winner_w = lobby[winner_role]
-        loser_w  = lobby[loser_role]
-        if winner_w: await send(winner_w, winner_msg)
-        if loser_w:  await send(loser_w,  loser_msg)
+        await end_match(lobby, winner_role)
         return
 
     lobby['host_first_ready']  = False
@@ -1233,16 +1328,23 @@ async def handle_fail_round(lobby, role, msg):
     if not lobby['options'].get('death_on_round_loss', True):
         return
 
+    # The blind clock is "hurry up and ready the next blind". A player who just
+    # died to a blind has already paid for this round, so disarm it — left
+    # running, it billed them a second life when it ran down, and if the blind
+    # had taken their last life it sent a second end screen.
+    if lobby.get('_timer_late_role') == role:
+        task = lobby.pop('_blind_timer_task', None)
+        if task and not task.done():
+            task.cancel()
+        _clear_timer_pause(lobby)
+        lobby['_timer_late_role'] = None
+        # Explicit 0: a paused clock has no task to do this from its finally.
+        await _broadcast_blind_timer(lobby, 0)
+
     await lose_life(lobby, role, 'round')
 
     if lobby[f'{role}_lives'] <= 0:
-        enemy_role = get_enemy_role(role)
-        score_results = await handle_record_result(lobby, enemy_role)
-        winner_msg, loser_msg = _make_gameover_msgs(lobby, enemy_role, score_results)
-        enemy_w = lobby.get(enemy_role)
-        my_w    = lobby[role]
-        if enemy_w: await send(enemy_w, winner_msg)
-        if my_w:    await send(my_w,    loser_msg)
+        await end_match(lobby, get_enemy_role(role))
 
 async def handle_set_ante(lobby, role, msg):
     lobby[f'{role}_ante'] = int(msg.get('ante', 1))
@@ -1280,13 +1382,65 @@ async def handle_lobby_options(lobby, role, msg):
     for key in ('lives', 'seed', 'back', 'stake', 'challenge', 'gamemode', 'ruleset',
                 'death_on_round_loss', 'hide_score_until_played', 'pvp_start_ante',
                 'comeback_gold', 'timer_seconds', 'pvp_boss_effects', 'sleeve',
-                'weeworld_showman'):
+                'weeworld_showman', 'decksmith', 'printer', 'pages',
+                'same_deck', 'same_seed'):
         if key in msg:
             lobby['options'][key] = msg[key]
     # Relay to guest so they see the config update
     guest_w = lobby.get('guest')
     if guest_w:
         await send(guest_w, {**msg, 'action': 'lobbyOptions'})
+
+# The guest's own run choices. Only meaningful with same_deck off, but always
+# accepted so the host's client can show what the guest picked.
+GUEST_CHOICE_KEYS = ('guest_back', 'guest_stake', 'guest_seed', 'guest_challenge',
+                     'guest_sleeve', 'guest_decksmith', 'guest_printer', 'guest_pages')
+
+async def handle_guest_choices(lobby, role, msg):
+    if role != 'guest':
+        return
+    for key in GUEST_CHOICE_KEYS:
+        if key in msg:
+            lobby['options'][key] = msg[key]
+    host_w = lobby.get('host')
+    if host_w:
+        out = {'action': 'guestChoices'}
+        for key in GUEST_CHOICE_KEYS:
+            if key in msg:
+                out[key] = msg[key]
+        await send(host_w, out)
+
+async def handle_forfeit(writer):
+    """A player left a live match through the pause menu's Forfeit button.
+    Told apart from a plain 'leave' so the other client can say what happened,
+    and the lobby closes the way a mid-game leave closes it. The walk-away is
+    recorded as a loss for them and a win for the other player."""
+    info = clients.get(writer)
+    if not info:
+        return
+    code  = info.get('code')
+    lobby = lobbies.get(code) if code else None
+    if lobby:
+        role     = info.get('role')
+        peer     = get_enemy_writer(lobby, role)
+        in_game  = lobby.get('is_in_game', False)
+        if in_game:
+            winner_role = get_enemy_role(role)
+            # Drop any live blind clock first: the lobby is about to go away
+            # and a coro still holding it would bill a life to nobody.
+            task = lobby.pop('_blind_timer_task', None)
+            if task and not task.done():
+                task.cancel()
+            await handle_record_result(lobby, winner_role)
+            log.info(f"lobby {code} forfeited by {role}, win to {winner_role}")
+        if peer:
+            if in_game:
+                await send(peer, {'action': 'stopGame', 'cause': 'forfeit'})
+            else:
+                await send(peer, {'action': 'peer_left'})
+        lobbies.pop(code, None)
+    info.pop('code', None)
+    info.pop('role', None)
 
 # main dispatch
 
@@ -1314,6 +1468,8 @@ async def dispatch(writer, msg):
     elif action == 'create':        await handle_create(writer, msg)
     elif action == 'join':          await handle_join(writer, msg)
     elif action == 'rejoin_host':   await handle_rejoin_host(writer, msg)
+    elif action == 'forfeit':
+        await handle_forfeit(writer)
     elif action == 'leave':
         info = clients.get(writer)
         if not info:
@@ -1380,6 +1536,13 @@ async def dispatch(writer, msg):
         lobby = lobbies.get(info.get('code'))
         if not lobby: return
         await handle_lobby_options(lobby, info['role'], msg)
+    # the guest's own run choices, used when the lobby allows separate decks
+    elif action == 'guestChoices':
+        info  = clients.get(writer)
+        if not info: return
+        lobby = lobbies.get(info.get('code'))
+        if not lobby: return
+        await handle_guest_choices(lobby, info['role'], msg)
     # game actions
     elif action in RELAY_ACTIONS:
         info  = clients.get(writer)
@@ -1575,8 +1738,11 @@ async def disconnect(writer):
     await broadcast(lobby, {'action': 'peer_left'}, exclude=writer)
     if in_game:
         await broadcast(lobby, {'action': 'stopGame'}, exclude=writer)
-        del lobbies[code]
-        log.info(f"lobby {code} closed (role={role} in_game)")
+        # pop, not del: the awaits above yield, so the other player's disconnect
+        # can drop the same lobby first and a del here raises KeyError out of
+        # handle_client's finally (skipping writer.close()).
+        if lobbies.pop(code, None) is not None:
+            log.info(f"lobby {code} closed (role={role} in_game)")
         return
 
     if role == 'guest':
@@ -1588,8 +1754,8 @@ async def disconnect(writer):
     lobby['guest_lobby_ready'] = False
 
     if not lobby.get('host') and not lobby.get('guest'):
-        del lobbies[code]
-        log.info(f"lobby {code} closed (empty after {role} left)")
+        if lobbies.pop(code, None) is not None:
+            log.info(f"lobby {code} closed (empty after {role} left)")
     else:
         log.info(f"lobby {code} {role} left, lobby held")
 

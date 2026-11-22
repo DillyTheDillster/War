@@ -38,6 +38,43 @@ G.FUNCS.copy_seed = function(e)
     if _orig_copy_seed then return _orig_copy_seed(e) end
 end
 
+-- While a match is live the pause menu's Main Menu reads "Forfeit" (patched in
+-- lovely/war.toml) and leaving through it forfeits: the relay is told before
+-- the run is torn down, so the opponent gets stopGame instead of waiting on a
+-- socket that is about to disappear.
+-- It takes two presses. The pause menu sits one slip away from the action, so
+-- the first press only arms it — the button turns orange and asks "Are You
+-- Sure?" — and the second press forfeits. The menu is rebuilt every time it is
+-- opened, so a fresh element is an unarmed button.
+local _orig_go_to_menu = G.FUNCS.go_to_menu
+G.FUNCS.go_to_menu = function(e)
+    if WAR.GAME.active then
+        if e and e.config then
+            if WAR.GAME._forfeit_e ~= e then
+                WAR.GAME._forfeit_e = e
+                e.config.colour = (G.C and (G.C.ORANGE or G.C.RED)) or nil
+                local row   = e.children and e.children[1]
+                local label = row and row.children and row.children[1]
+                if label and label.config then
+                    label.config.text = localize('war_forfeit_confirm')
+                    -- Text is drawn from config.text_drawable, not config.text,
+                    -- and update_text() only regenerates the drawable when a
+                    -- ref_table changes. Repaint it here or the label stays
+                    -- "Forfeit" while the button turns orange.
+                    if label.config.text_drawable then
+                        label.config.text_drawable:set(label.config.text)
+                    end
+                    if label.UIBox then label.UIBox:recalculate() end
+                end
+                return
+            end
+            WAR.GAME._forfeit_e = nil
+        end
+        WAR.LOBBY.forfeit()
+    end
+    if _orig_go_to_menu then return _orig_go_to_menu(e) end
+end
+
 local _orig_game_update = Game.update
 function Game:update(dt)
     _orig_game_update(self, dt)
@@ -54,6 +91,22 @@ function Game:update(dt)
             if WAR.UI.update_connection_status then WAR.UI.update_connection_status() end
         end)
     end
+    -- Frozen time: run_time only advances while the run is actually running, so
+    -- a timer-based mechanic can measure elapsed play instead of wall clock.
+    WAR.GAME._run_time = (WAR.GAME._run_time or 0) + WAR.GAME.mod_dt(dt)
+    -- Layer updates: gamemode then ruleset, the same order calculate uses, so a
+    -- ruleset can rely on the gamemode having run first. Only during a live
+    -- match — War's gamemodes and rulesets describe a multiplayer run, and the
+    -- lobby config they are read from is not the thing driving a solo one.
+    -- They get mod_dt: zero while the run is held (ready barrier, paused).
+    if WAR.GAME.active then
+        local layer_dt = WAR.GAME.mod_dt(dt)
+        local gm, rs = WAR.LOBBY.config.gamemode, WAR.LOBBY.config.ruleset
+        local gm_layer = gm and WAR.GAMEMODES[gm]
+        local rs_layer = rs and WAR.RULESETS[rs]
+        if gm_layer and gm_layer.update then gm_layer.update(self, layer_dt) end
+        if rs_layer and rs_layer.update then rs_layer.update(self, layer_dt) end
+    end
     -- Tick round-counter timer display while waiting for readyBlind.
     -- DynaText already reads G.GAME.round each frame, so just overwrite it.
     if WAR.GAME._pvp_timer and G.TIMERS and G.GAME then
@@ -62,8 +115,7 @@ function Game:update(dt)
         if t.paused then
             G.GAME.round = t._paused_remaining or t.secs
         else
-            local elapsed = G.TIMERS.REAL - t.start
-            local left    = math.max(0, math.ceil(t.secs - elapsed))
+            local left = WAR.GAME.timer_remaining()
             G.GAME.round  = left
             -- Final ten seconds: one click per second, keyed off the countdown
             -- so a slow frame can neither double up nor skip a click.
@@ -72,6 +124,17 @@ function Game:update(dt)
                 play_sound("war_timer", 1, 1)
             end
         end
+    end
+    -- The round box is styled when the clock is armed, but that message can
+    -- land while the HUD is being rebuilt for the new blind — the styling then
+    -- goes to a node that is replaced a frame later and "Round" stays on screen
+    -- while the number counts. Re-check until the row we styled is the live one.
+    if WAR.UI.sync_timer_hud then WAR.UI.sync_timer_hud() end
+    -- Blind-entry recovery: a startBlind that beat the select screen, and a
+    -- readyBlind that never drew one.
+    if WAR.SYNC then
+        if WAR.SYNC.retry_pending_start then WAR.SYNC.retry_pending_start() end
+        if WAR.SYNC.maybe_resend_ready  then WAR.SYNC.maybe_resend_ready()  end
     end
     if WAR.UI.sync_rival_icons then WAR.UI.sync_rival_icons() end
     if WAR.NET.connected() then
@@ -116,16 +179,20 @@ end
 
 local _orig_start_run = Game.start_run
 function Game:start_run(start_params)
-    if WAR.GAME.active and (WAR.LOBBY.config.seed or WAR.LOBBY.config.sleeve) then
+    -- A mid-match restart has to come up on the same run this client is playing
+    -- — which is not always the host's when the lobby allows separate decks or
+    -- seeds, hence the per-client copy taken in on_start_game.
+    local local_run = WAR.GAME.active and WAR.GAME.local_run
+    if local_run then
         start_params = start_params or {}
-        if WAR.LOBBY.config.seed then
-            start_params.seed = tostring(WAR.LOBBY.config.seed)
+        if local_run.seed then
+            start_params.seed = tostring(local_run.seed)
         end
-        -- CardSleeves only looks at the run args, so a mid-match restart needs
-        -- the sleeve put back or the new run comes up without it.
-        if WAR.LOBBY.config.sleeve then
-            start_params.casl_sleeve_choice = WAR.LOBBY.config.sleeve
-        end
+        -- CardSleeves reads the sleeve only off the run args and falls back to
+        -- G.viewed_sleeve when the key is missing, so a mid-match restart of a
+        -- sleeveless run has to write the blank slot explicitly or the new run
+        -- inherits whatever the deck picker last browsed.
+        start_params.casl_sleeve_choice = local_run.sleeve or "sleeve_casl_none"
     end
     _orig_start_run(self, start_params)
     if WAR.GAME.active then
@@ -644,14 +711,21 @@ function Blind:set_blind(blind, reset, silent)
         and WAR.LOBBY.config.pvp_boss_effects == false
         and WAR.is_rival_blind(blind)
     if suppress then
-        _orig_set_blind(self, {
+        -- `vars` has to be here: vanilla's Blind:set_text looks the description's
+        -- placeholders up in `loc_vars or self.config.blind.vars`, and loc_vars is
+        -- only built for the real name (The Ox). With the name blanked, localize
+        -- gets vars = nil and indexes it on any boss text that has a {1} — the
+        -- crash lands in functions/misc_functions.lua, not in War.
+        local stand_in = {
             name    = '',
             key     = blind.key,
             dollars = blind.dollars,
             mult    = blind.mult,
             boss    = blind.boss,
             pos     = blind.pos,
-        }, reset, silent)
+            vars    = type(blind.vars) == 'table' and blind.vars or {},
+        }
+        _orig_set_blind(self, stand_in, reset, silent)
         self.config.blind = blind
         self.name         = blind.name
         self.boss         = not not blind.boss
@@ -733,6 +807,8 @@ G.FUNCS.select_blind = function(e)
                 return
             end
             WAR.GAME._pending_blind_e = e
+            WAR.GAME._ready_sent_at   = WAR.GAME.now()
+            WAR.GAME._ready_resends   = 0
             WAR.NET.send({ action = "readyBlind", skips = (G.GAME and G.GAME.skips) or 0 })
             -- Auto-start off: the relay opens the opponent's clock as soon as we
             -- ready up, so freeze it again straight away. Order is kept per
@@ -1096,29 +1172,19 @@ end
 
 -- Tags never reach that hook. The tag collection builds Tag objects whose art
 -- is a bare Sprite: nothing lands in G.your_collection and there is no
--- set_debuff to call. Card:draw paints the debuff shader over its own finished
--- center sprite, so do the same here, after the sprite's draw_steps.
-function WAR.debuff_sprite(sprite)
-    if not sprite or sprite.war_debuffed then return end
-    sprite.war_debuffed = true
-
-    local _orig_draw = sprite.draw
-    sprite.draw = function(self, overlay)
-        _orig_draw(self, overlay)
-        if not self.states.visible then return end
-        self.ARGS.send_to_shader = self.ARGS.send_to_shader or {}
-        self.ARGS.send_to_shader[1] = math.min(self.VT.r*3, 1) + G.TIMERS.REAL/28
-            + (self.juice and self.juice.r*20 or 0)
-        self.ARGS.send_to_shader[2] = G.TIMERS.REAL
-        self:draw_shader('debuff', nil, self.ARGS.send_to_shader)
-    end
-end
-
+-- set_debuff to call.  Mirror exactly what the original lovely patch did:
+-- replace the sprite's draw_steps so the debuff shader fires as part of the
+-- draw pipeline rather than appended after the fact.
+-- (The lovely patch in war.toml targeting UI_definitions.lua is dead because
+-- SMODS completely replaces create_UIBox_your_collection_tags; this Lua hook
+-- fires through Tag:generate_UI regardless of which collection function calls it.)
 if Tag and Tag.generate_UI then
     local _orig_tag_generate_UI = Tag.generate_UI
     function Tag:generate_UI(_size)
         local node, sprite = _orig_tag_generate_UI(self, _size)
-        if WAR.key_banned(self.key) then WAR.debuff_sprite(sprite) end
+        if WAR.key_banned(self.key) and sprite and sprite.define_draw_steps then
+            sprite:define_draw_steps({{shader='dissolve',shadow_height=0.05},{shader='debuff'}})
+        end
         return node, sprite
     end
 end

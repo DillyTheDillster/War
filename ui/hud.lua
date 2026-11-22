@@ -469,24 +469,30 @@ function WAR.UI.setup_timer_hud()
             row.states.hover.can  = row._war_timer_orig.hover_can
         end
         WAR.UI.update_timer_hud_label()
+        if t then t._hud_row = row end
         return
     end
     -- First time: save originals on the number box and style it.
     local dyna = _round_dynatext()
+    -- The DynaText can outlive the row it sits in (a rebuilt HUD reuses it), so
+    -- the true original scale is kept on the object: multiplying the live scale
+    -- by 0.7 again on every rebuild would shrink the countdown to nothing.
+    local dyna_orig_scale = dyna and (dyna._war_scale_orig or dyna.scale)
     row._war_timer_orig = {
         colour      = row.config.colour,
         hover       = row.config.hover,
         hover_can   = row.states.hover.can,
         shadow      = row.config.shadow,
         dyna_col    = dyna and dyna.colours and dyna.colours[1],
-        dyna_scale  = dyna and dyna.scale,
+        dyna_scale  = dyna_orig_scale,
     }
     -- Orange (or red if paused) background, white number text.
     row.config.colour    = timer_colour
     row.states.hover.can = false  -- enabled below only for the waiting player
     if dyna then
         if dyna.colours then dyna.colours[1] = G.C.WHITE end
-        dyna.scale = (dyna.scale or 1) * 0.7
+        dyna._war_scale_orig = dyna_orig_scale
+        dyna.scale = (dyna_orig_scale or 1) * 0.7
         dyna:update_text(true)
     end
     if t and t.is_mine then
@@ -494,7 +500,28 @@ function WAR.UI.setup_timer_hud()
         row.config.shadow     = true
         row.states.hover.can  = true
     end
+    if t then t._hud_row = row end
     WAR.UI.update_timer_hud_label()
+end
+
+-- Per-frame safety net: the clock arrives by message, so it can land while the
+-- HUD is mid-rebuild (select screen → blind) and style a row that is replaced
+-- on the next frame — the countdown then runs with the box still reading
+-- "Round". Cheap enough to tick at ~5 Hz: only the node lookup, and restyle
+-- only when the live row is not the one we styled.
+function WAR.UI.sync_timer_hud()
+    local t = WAR.GAME._pvp_timer
+    if not t then return end
+    local now = WAR.GAME.now()
+    if t._hud_at and (now - t._hud_at) < 0.2 then return end
+    t._hud_at = now
+    local _, _, row = _round_label_node()
+    if not row then return end          -- HUD not built yet: try again next tick
+    if row ~= t._hud_row or not row._war_timer_orig then
+        WAR.UI.setup_timer_hud()
+    else
+        WAR.UI.update_timer_hud_label()
+    end
 end
 
 function WAR.UI.reset_timer_hud()
