@@ -7,6 +7,7 @@ import time
 import hashlib
 import hmac
 import os
+from weakref import WeakKeyDictionary
 import sqlite3
 import logging
 import socket as _socket
@@ -222,7 +223,9 @@ PORT          = int(os.environ.get("WAR_PORT", 7777))
 CODE_LEN      = 5
 CODE_CHARS    = string.ascii_uppercase + string.digits
 CODE_TTL      = 300
-MSG_MAX       = 65536
+MSG_MAX       = 480 * 360 * 2 * 4 // 3 + 8192
+HD_WIDTHS     = (1280, 1600, 1920, 2560, 3200, 3840)
+HD_DATA_MAX   = 2 * 1024 * 1024  # base64 characters per frame
 TOKEN_TTL     = 60 * 60 * 24 * 30  # 30 days
 SESSION_CAP   = 1
 PING_INTERVAL = 15    # seconds between heartbeat pings sent to each client
@@ -443,14 +446,20 @@ _guest_counter = 0
 
 # network helpers
 
+def next_sequence(info):
+    seq = info.get('_seq', 0)
+    info['_seq'] = seq + 1
+    return seq
+
+def write_message(writer, msg):
+    info = clients.get(writer)
+    if info is not None:
+        msg = {**msg, '_seq': next_sequence(info)}
+    writer.write((json.dumps(msg, separators=(',', ':')) + '\n').encode())
+
 async def send(writer, msg):
     try:
-        info = clients.get(writer)
-        if info is not None:
-            seq = info.get('_seq', 0)
-            msg = {**msg, '_seq': seq}
-            info['_seq'] = seq + 1
-        writer.write((json.dumps(msg) + '\n').encode())
+        write_message(writer, msg)
         await writer.drain()
     except Exception:
         pass
@@ -526,6 +535,7 @@ async def handle_login(writer, msg):
     db.commit()
     clients[writer]['user_id']  = row['id']
     clients[writer]['username'] = username
+    clients[writer]['account_name'] = username
     # Fetch avatar to include in response
     av_row = db.execute("SELECT avatar_data FROM users WHERE id=?", (row['id'],)).fetchone()
     avatar = av_row['avatar_data'] if av_row and av_row['avatar_data'] else "default"
@@ -549,6 +559,7 @@ async def handle_token_login(writer, msg):
     db.commit()
     clients[writer]['user_id']  = row['user_id']
     clients[writer]['username'] = row['username']
+    clients[writer]['account_name'] = row['username']
     avatar = row['avatar_data'] if row['avatar_data'] else "default"
     entitlements = get_user_entitlements(row['username'])
     clients[writer]['_sent_entitlements'] = set(entitlements)
@@ -561,6 +572,7 @@ async def handle_logout(writer, msg):
     if token:
         db.execute("DELETE FROM sessions WHERE token=?", (token,))
         db.commit()
+    clients[writer].pop('account_name', None)
     await send(writer, {'action': 'logged_out'})
 
 async def handle_stats(writer, msg):
@@ -708,6 +720,8 @@ async def handle_create(writer, msg):
         'gamemode':      msg.get('gamemode', 'vanilla'),
         'options':       {'death_on_round_loss': True},   # lives, seed, back, stake, challenge, toggles
         '_code':         code,
+        'spectators':    set(),
+        'viewer_numbers': WeakKeyDictionary(),
         'host_lobby_ready':  False,
         'guest_lobby_ready': False,
         'host_pfp':          validate_icon(info.get('username'), msg.get('pfp', 'default')),
@@ -728,7 +742,10 @@ async def handle_join(writer, msg):
         return
     if lobby['guest']:
         if lobby['guest'] in clients:
-            await send(writer, {'action': 'error', 'reason': 'full'})
+            if msg.get('spectate_if_full') is True:
+                await handle_spectate(writer, msg)
+            else:
+                await send(writer, {'action': 'error', 'reason': 'full'})
             return
         # stale slot — reconnected before heartbeat cleaned it up
         lobby['guest']             = None
@@ -748,6 +765,7 @@ async def handle_join(writer, msg):
     host_username = host_info.get('username', 'Host')
     guest_pfp = validate_icon(info.get('username'), msg.get('pfp', 'default'))
 
+    info['pfp'] = guest_pfp
     lobby['guest']         = writer
     lobby['guest_user_id'] = info.get('user_id')
     # Reset readiness for both when a new guest joins
@@ -775,6 +793,7 @@ async def handle_join(writer, msg):
     # timer_seconds, etc. from the moment they join (not just future changes).
     if lobby['options']:
         await send(writer, {'action': 'lobbyOptions', **lobby['options']})
+    publish_viewers(lobby, writer)
     log.info(f"lobby {code} guest joined")
 
 # game state helpers
@@ -1442,6 +1461,227 @@ async def handle_forfeit(writer):
     info.pop('code', None)
     info.pop('role', None)
 
+def publish_viewers(room, recipient=None):
+    viewers = sorted((clients[writer] for writer in room['spectators']), key=lambda viewer: viewer['viewer_number'])
+    names = [viewer.get('account_name') or f"Spectator {viewer['viewer_number']}" for viewer in viewers]
+    positions = {viewer['viewer_number']: row for row, viewer in enumerate(viewers, 1)}
+    recipients = (recipient,) if recipient else (room['host'], room['guest'], *room['spectators'])
+    for writer in recipients:
+        if writer in clients and not writer.is_closing():
+            try:
+                row = positions[clients[writer]['viewer_number']] if writer in room['spectators'] else None
+                write_message(writer, {
+                    'action': 'spectatorRoster', 'code': room['_code'],
+                    'names': names, 'your_row': row,
+                })
+            except (OSError, RuntimeError):
+                pass
+
+def unsubscribe(writer, info):
+    room = info.pop('watching', None)
+    if room is not None:
+        room['spectators'].discard(writer)
+        publish_viewers(room)
+
+def player_account_names(room):
+    names = {}
+    for role in ('host', 'guest'):
+        name = clients.get(room.get(role), {}).get('account_name')
+        if name:
+            names[role] = name
+    return names
+
+def watch_lobby(room):
+    seats = {}
+    for role in ('host', 'guest'):
+        player = clients.get(room[role])
+        if player is not None:
+            seats[role] = player.get('username') or role.title()
+    return {
+        'code': room['_code'],
+        'playing': room['is_in_game'],
+        'seats': seats,
+        'viewers': len(room['spectators']),
+        'host_ready': room['host_lobby_ready'],
+        'guest_ready': room['guest_lobby_ready'],
+    }
+
+async def promote_guest(room):
+    guest = room['guest']
+    info = clients[guest]
+    room['host'] = guest
+    room['guest'] = None
+    room['host_user_id'] = info.get('user_id')
+    room['guest_user_id'] = None
+    # Carry the former guest's pfp into the host slot.
+    room['host_pfp'] = info.get('pfp', 'default')
+    room['host_lobby_ready'] = room['guest_lobby_ready'] = False
+    info['role'] = 'host'
+    await send(guest, {'action': 'promoted_to_host', 'code': room['_code'],
+                       'options': room['options']})
+
+async def change_seat(writer, msg):
+    info = clients[writer]
+    if msg['action'] == 'takeSeat':
+        room = info.get('watching')
+        seat = msg.get('seat')
+        if (not room or lobbies.get(room['_code']) is not room or room['is_in_game']
+                or seat != 'guest' or room['guest'] is not None or room['host'] not in clients):
+            await send(writer, {'action': 'seatUnavailable'})
+            return
+        unsubscribe(writer, info)
+        await handle_join(writer, {**msg, 'code': room['_code']})
+        return
+
+    room = lobbies.get(info.get('code'))
+    role = info.get('role')
+    if not room or room['is_in_game'] or role not in ('host', 'guest') or room[role] is not writer:
+        await send(writer, {'action': 'seatUnavailable'})
+        return
+    peer = room[get_enemy_role(role)]
+    if peer not in clients or peer.is_closing():
+        await send(writer, {'action': 'seatUnavailable', 'reason': 'last_player'})
+        return
+    room[role] = room[role + '_user_id'] = None
+    room['host_lobby_ready'] = room['guest_lobby_ready'] = False
+    info.pop('code')
+    info.pop('role')
+    if role == 'host':
+        await promote_guest(room)
+    else:
+        await send(peer, {'action': 'peer_left'})
+    await handle_spectate(writer, {**msg, 'code': room['_code'], 'switched': True})
+
+async def handle_spectate(writer, msg):
+    info = clients[writer]
+    code = str(msg.get('code', '')).strip().upper()
+    room = lobbies.get(code)
+    if info.get('code') or not room:
+        await send(writer, {'action': 'watchEnded', 'reason': 'Room unavailable'})
+        return
+    if msg.get('stream') != 1 or msg.get('codec') != 'lz4':
+        await send(writer, {'action': 'watchEnded', 'reason': 'Update War to spectate this room'})
+        return
+    unsubscribe(writer, info)
+    numbers = room['viewer_numbers']
+    if writer not in numbers:
+        room['next_viewer'] = room.get('next_viewer', 0) + 1
+        numbers[writer] = room['next_viewer']
+    info['viewer_number'] = numbers[writer]
+    room['spectators'].add(writer)
+    info['watching'] = room
+    info['pane_widths'] = {}
+    info['watch_sent'] = {}
+    info['watch_acked'] = {}
+    await send(writer, {'action': 'watchJoined', 'stream': 1,
+                        'names': player_account_names(room), 'lobby': watch_lobby(room),
+                        'switched': msg.get('switched') is True})
+    publish_viewers(room)
+
+def handle_watch_ack(writer, msg):
+    info = clients[writer]
+    if not info.get('watching'):
+        return
+    for role in ('host', 'guest'):
+        ack = msg.get(role)
+        if type(ack) is int and info['watch_acked'].get(role, 0) < ack <= info['watch_sent'].get(role, 0):
+            info['watch_acked'][role] = ack
+
+async def handle_watch_pull(writer, msg):
+    info = clients[writer]
+    room = info.get('watching')
+    if not room or lobbies.get(room['_code']) is not room:
+        unsubscribe(writer, info)
+        await send(writer, {'action': 'watchEnded', 'reason': 'Room closed'})
+        return
+    preview = msg.get('lobby_preview') is True
+    info['lobby_preview'] = preview
+    sizes = msg.get('pane_widths')
+    info['pane_widths'] = ({role: sizes[role] for role in ('host', 'guest')
+                            if type(sizes.get(role)) is int and 1 <= sizes[role] <= 3840}
+                           if isinstance(sizes, dict) else {})
+    if room['is_in_game'] or preview:
+        now = asyncio.get_running_loop().time()
+        for role in ('host', 'guest'):
+            player = clients.get(room[role])
+            if player is None:
+                continue
+            player['stream_until'] = now + 2
+            player['stream_room'] = room
+            if now - player.get('stream_refresh', -10) <= 0.25:
+                continue
+            player['stream_refresh'] = now
+            demand = max(clients[w].get('pane_widths', {}).get(role, 960) for w in room['spectators'])
+            width = next(w for w in (960, *HD_WIDTHS) if w >= demand)
+            if width > 960:
+                player['hd_sender'] = True
+            player['capture_width'] = width
+            await send(room[role], {'action': 'watchCapture', 'stream': 1, 'codec': 'lz4',
+                                    'lobby_preview': preview, 'width': width})
+    await send(writer, {'action': 'watchReady', 'names': player_account_names(room),
+                        'lobby': watch_lobby(room)})
+
+async def handle_watch_frame(writer, msg):
+    info = clients[writer]
+    room = lobbies.get(info.get('code'))
+    data, height = msg.get('pixels'), msg.get('height')
+    t = asyncio.get_running_loop().time()
+    width, codec = msg.get('width', 480), msg.get('codec')
+    streaming = info.get('stream_room') is room and t < info.get('stream_until', 0)
+    if not room or not streaming or room.get(info.get('role')) is not writer:
+        return
+    if not isinstance(data, str) or type(height) is not int or type(width) is not int:
+        return
+    if width not in (480, 720, 960, *HD_WIDTHS) or width > max(960, info.get('capture_width', 960)):
+        return
+    if not 1 <= height <= min(2160, width * 0.75):
+        return
+
+    if codec is None:
+        if width != 480 or len(data) != 4 * ((480 * height * 2 + 2) // 3):
+            return
+    elif codec == 'lz4':
+        if not 8 <= len(data) <= (HD_DATA_MAX if width > 960 else 461_336):
+            return
+    else:
+        return
+
+    slots = {}
+    supplied = msg.get('slots')
+    if not room['is_in_game'] and isinstance(supplied, dict):
+        for key in ('host', 'guest', 'spectators'):
+            box = supplied.get(key)
+            if (isinstance(box, list) and len(box) == 4
+                    and all(type(n) in (int, float) and -2 <= n <= 3 for n in box)
+                    and box[0] < box[2] and box[1] < box[3]):
+                slots[key] = box
+    role = info['role']
+    payload = None
+    for viewer in room['spectators']:
+        state = clients[viewer]
+        if not (room['is_in_game'] or state.get('lobby_preview')):
+            continue
+        # Frames are independent, so a slow viewer can skip straight to the next one.
+        # https://docs.python.org/3/library/asyncio-protocol.html#asyncio.WriteTransport.get_write_buffer_size
+        sent = state['watch_sent'].get(role, 0)
+        if (sent - state['watch_acked'].get(role, 0) >= 6 or viewer.is_closing()
+                or viewer.transport.get_write_buffer_size() > 196_608):
+            continue
+        try:
+            if payload is None:
+                fields = {'action': 'watchView', 'role': role, 'pixels': data,
+                          'height': height, 'width': width, 'codec': codec}
+                if slots:
+                    fields['slots'] = slots
+                # The header supplies the opening brace and each viewer's sequence numbers.
+                payload = (json.dumps(fields, separators=(',', ':'))[1:] + '\n').encode()
+            header = b'{"frame":%d,"_seq":%d,' % (sent + 1, next_sequence(state))
+            viewer.write(header + payload)
+            state['watch_sent'][role] = sent + 1
+        except (OSError, RuntimeError):
+            continue
+
+
 # main dispatch
 
 # Simple peer relay actions (no server logic)
@@ -1450,6 +1690,21 @@ RELAY_ACTIONS = {'hello', 'chat', 'modData'}
 async def dispatch(writer, msg):
     action = msg.get('action')
 
+    if action in ('takeSeat', 'giveUpSeat'):
+        await change_seat(writer, msg)
+        return
+    if action == 'spectate':
+        return await handle_spectate(writer, msg)
+    if action == 'unwatch':
+        return unsubscribe(writer, clients[writer])
+    if action == 'watchPull':
+        return await handle_watch_pull(writer, msg)
+    if action == 'watchFrame':
+        return await handle_watch_frame(writer, msg)
+    if action == 'watchAck':
+        return handle_watch_ack(writer, msg)
+    if clients[writer].get('watching') and action != 'pong':
+        return
     # auth
     if   action == 'register':      await handle_register(writer, msg)
     elif action == 'get_salt':      await handle_get_salt(writer, msg)
@@ -1486,22 +1741,9 @@ async def dispatch(writer, msg):
                 del lobbies[code]
                 log.info(f"lobby {code} closed (role={role} in_game, left)")
             elif role == 'host':
-                guest_writer = lobby.get('guest')
-                if guest_writer is not None:
+                if lobby.get('guest') is not None:
                     # Promote the guest to host so they don't lose the lobby.
-                    lobby['host']              = guest_writer
-                    lobby['guest']             = None
-                    lobby['host_lobby_ready']  = False
-                    lobby['guest_lobby_ready'] = False
-                    # Carry the former guest's pfp into the host slot.
-                    guest_info = clients.get(guest_writer, {})
-                    lobby['host_pfp'] = guest_info.get('pfp', 'default')
-                    clients[guest_writer]['role'] = 'host'
-                    await send(guest_writer, {
-                        'action':  'promoted_to_host',
-                        'code':    code,
-                        'options': lobby.get('options', {}),
-                    })
+                    await promote_guest(lobby)
                     log.info(f"lobby {code} host left, guest promoted to host")
                 else:
                     # No guest — close the empty lobby.
@@ -1632,7 +1874,7 @@ async def handle_rejoin_host(writer, msg):
     if not lobby:
         await send(writer, {'action': 'error', 'reason': 'no_lobby'})
         return
-    # identity check — only the original host may reclaim the slot
+    # Only the account holding the host seat may reclaim it.
     if not info.get('user_id') or info['user_id'] != lobby.get('host_user_id'):
         await send(writer, {'action': 'error', 'reason': 'no_lobby'})
         return
@@ -1672,6 +1914,7 @@ async def handle_rejoin_host(writer, msg):
             'mod_version':   clients[writer].get('mod_version'),
             'smods_version': clients[writer].get('smods_version'),
         })
+    publish_viewers(lobby, writer)
     log.info(f'lobby {code} host rejoined')
 
 async def handle_client(reader, writer):
@@ -1692,17 +1935,25 @@ async def handle_client(reader, writer):
             pass
 
     hb  = asyncio.ensure_future(heartbeat_task(writer, sid))
-    buf = ''
+    buf = bytearray()
     try:
         while True:
-            chunk = await reader.read(4096)
+            chunk = await reader.read(65536)
             if not chunk:
                 break
-            buf += chunk.decode(errors='ignore')
-            if len(buf) > MSG_MAX:
-                break
-            while '\n' in buf:
-                line, buf = buf.split('\n', 1)
+            buf.extend(chunk)
+            sender = clients.get(writer, {})
+            hd = sender.get('hd_sender', False)
+            limit = HD_DATA_MAX + 8192 if hd else MSG_MAX
+            offset = 0
+            while True:
+                end = buf.find(b'\n', offset)
+                if end < 0:
+                    break
+                if end - offset > limit:
+                    return
+                line = buf[offset:end]
+                offset = end + 1
                 line = line.strip()
                 if not line:
                     continue
@@ -1711,6 +1962,10 @@ async def handle_client(reader, writer):
                 except Exception:
                     continue
                 await dispatch(writer, msg)
+            if offset:
+                del buf[:offset]
+            if len(buf) > limit:
+                break
     except Exception as e:
         log.info(f"error sid={sid}: {e}")
     finally:
@@ -1724,6 +1979,8 @@ async def handle_client(reader, writer):
 
 async def disconnect(writer):
     info = clients.pop(writer, None)
+    if info is not None:
+        unsubscribe(writer, info)
     _write_status()
     if not info:
         return

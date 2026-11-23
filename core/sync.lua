@@ -16,6 +16,7 @@
 WAR.SYNC = {}
 
 function WAR.NET.on_relay_disconnected()
+    WAR.SPECTATOR.reset()
     if WAR.GAME.active then
         WAR.GAME.active = false
         WAR.UI.show_message(localize('war_relay_lost'))
@@ -44,12 +45,16 @@ function WAR.NET.on_relay_disconnected()
 end
 
 function WAR.SYNC.tick()
+    WAR.SPECTATOR.tick()
     local msgs = WAR.NET.poll()
     for _, m in ipairs(msgs) do
         local a = m.action
 
+        if WAR.SPECTATOR.handle(m) then
+            -- The spectator handler consumed this message.
+
         -- auth
-        if a == "registered" or a == "logged_in" or a == "logged_out"
+        elseif a == "registered" or a == "logged_in" or a == "logged_out"
         or a == "salt"       or a == "auth_error" then
             WAR.AUTH.handle(m)
 

@@ -121,7 +121,7 @@ function WAR.LOBBY.create()
     return true
 end
 
-function WAR.LOBBY.join(code)
+function WAR.LOBBY.join(code, spectate_if_full)
     WAR.LOBBY_STATE = "joining"
     -- Start from the panel defaults too, so the read-only view never shows a
     -- toggle left over from the last match before the host's config lands.
@@ -130,10 +130,17 @@ function WAR.LOBBY.join(code)
     local ok, err = WAR.NET.connect()
     if not ok then WAR.LOBBY_STATE = "none"; return false, err end
     local mod_ver, smods_ver = WAR.mod_versions()
-    WAR.NET.send({ action="join", code=code:upper():gsub("%s",""),
-                   pfp = WAR.AVATAR and WAR.AVATAR.selected or "default",
-                   mod_version = mod_ver, smods_version = smods_ver })
-    -- confirmation arrives async (action="joined")
+    WAR.NET.send({
+        action           = "join",
+        code             = code:upper():gsub("%s", ""),
+        spectate_if_full = spectate_if_full,
+        codec            = spectate_if_full and "lz4" or nil,
+        stream           = spectate_if_full and 1 or nil,
+        pfp              = WAR.AVATAR and WAR.AVATAR.selected or "default",
+        mod_version      = mod_ver,
+        smods_version    = smods_ver
+    })
+    -- A full room replies with "watchJoined" when spectate_if_full is set.
     return true
 end
 

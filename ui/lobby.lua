@@ -393,8 +393,9 @@ function WAR.UI.on_promoted_to_host()
     end
     WAR.UI.update_lobby_status()
     WAR.UI.update_deck_info()
-    WAR.UI.show_message(localize('war_promoted_to_host'))
-    G.FUNCS.wipe_on()
+    local code = WAR.LOBBY.code
+    local start_wipe = not G.screenwipe
+    if start_wipe then G.FUNCS.wipe_on() end
     G.E_MANAGER:add_event(Event({
         no_delete = true,
         func = function()
@@ -404,7 +405,18 @@ function WAR.UI.on_promoted_to_host()
             return true
         end,
     }))
-    G.FUNCS.wipe_off()
+    if start_wipe then G.FUNCS.wipe_off() end
+    -- Opening the message pauses the events that remove the wipe.
+    G.E_MANAGER:add_event(Event({
+        blocking = false,
+        func = function()
+            if G.screenwipe then return false end
+            if WAR.LOBBY.is_host and WAR.LOBBY.code == code then
+                WAR.UI.show_message(localize('war_promoted_to_host'))
+            end
+            return true
+        end,
+    }))
 end
 
 -- 4 equal-width slots: [Ready/Start] [Options] [Players|Code] [Leave]
@@ -794,6 +806,8 @@ function G.UIDEF.war_players_popup()
     local guest_av = WAR.LOBBY.is_host and avatar_node("guest") or avatar_node(nil)
 
     return create_UIBox_generic_options({ contents={
+        UIBox_button({label={"Switch to spectator"}, button="war_give_up_seat",
+            colour=G.C.PURPLE, minw=4, minh=0.65}),
         { n=G.UIT.R, config={ align="cm", padding=0.1 }, nodes={
             { n=G.UIT.T, config={ text=localize('war_players_title'),
                 scale=0.45, colour=G.C.UI.TEXT_LIGHT, shadow=true }},
@@ -1368,7 +1382,7 @@ function WAR.UI.create_lobby_panels()
     end
 
     -- own name = blue box, rival = red box, empty slot = gray box
-    local function player_row(name, ready, is_own)
+    local function player_row(name, ready, is_own, role)
         local border   = (name == nil) and GRAY or (is_own and G.C.BLUE or G.C.RED)
         local icon_key = is_own
             and ((WAR.AVATAR and WAR.AVATAR.selected) or "jimbo")
@@ -1396,7 +1410,9 @@ function WAR.UI.create_lobby_panels()
                     name_text,
                 }}
             or  name_text
-        return left_box(inner, border)
+        local row = left_box(inner, border)
+        row.config.id = "war_seat_" .. role
+        return row
     end
 
     -- Players panel
@@ -1407,24 +1423,46 @@ function WAR.UI.create_lobby_panels()
             GRAY, LBH_header
         ),
         { n=G.UIT.R, config={ minh=0.05 }, nodes={} },
-        player_row(WAR.LOBBY.host_name or localize('war_role_host'), host_ready,  WAR.LOBBY.is_host),
+        player_row(WAR.LOBBY.host_name or localize('war_role_host'), host_ready,  WAR.LOBBY.is_host, "host"),
         { n=G.UIT.R, config={ minh=0.04 }, nodes={} },
-        player_row(WAR.LOBBY.guest_name,                              guest_ready, not WAR.LOBBY.is_host),
+        player_row(WAR.LOBBY.guest_name,                              guest_ready, not WAR.LOBBY.is_host, "guest"),
     })
 
     -- Spectators panel
-    local spectators_def = left_panel_root({
-        left_box(
-            { n=G.UIT.T, config={ text=localize('war_panel_spectators'),
-                scale=TS-0.03, colour=G.C.WHITE, shadow=true }},
-            GRAY, LBH_header
-        ),
-        { n=G.UIT.R, config={ minh=0.05 }, nodes={} },
-        left_box(
-            { n=G.UIT.T, config={ text="—", scale=TS, colour=G.C.WHITE }},
-            GRAY
-        ),
-    })
+    local room_h = G.ROOM_ATTACH.T.h
+    local players = war_panel_box(players_def, "cli", LOFF, 0, "left")
+    local names = WAR.SPECTATOR.viewer_names(WAR.LOBBY.code)
+    local function spectator_panel(visible)
+        local heading = localize('war_panel_spectators')
+        if visible < #names then
+            heading = heading .. " (+" .. (#names - visible) .. ")"
+        end
+        local rows = {
+            left_box({n=G.UIT.T, config={text=heading, scale=TS-0.03, colour=G.C.WHITE,
+                shadow=true}}, GRAY, LBH_header),
+            {n=G.UIT.R, config={minh=0.05}, nodes={}},
+        }
+        for i = 1, visible do
+            rows[#rows+1] = left_box({n=G.UIT.T, config={text=names[i], scale=TS, colour=G.C.WHITE}}, GRAY)
+        end
+        local action = left_box({n=G.UIT.T, config={text="Spectate", scale=TS, colour=G.C.WHITE}}, GRAY)
+        action.config.id = "war_spectate_row"
+        rows[#rows+1] = action
+        return war_panel_box(left_panel_root(rows), "cli", LOFF, 0, "spec")
+    end
+
+    local spectators = spectator_panel(0)
+    if #names > 0 then
+        -- Each name takes the same height as the Spectate row.
+        local row = spectators:get_UIE_by_ID("war_spectate_row")
+        local row_height = row.T.h + row.config.emboss + C_PAD
+        local space = room_h - 3 * PAD - players.T.h - spectators.T.h
+        local visible = math.min(#names, math.floor(space / row_height))
+        if visible > 0 then
+            spectators:remove()
+            spectators = spectator_panel(visible)
+        end
+    end
 
     -- Right panel: vertical stack
     -- Deck/stake/seed are this client's own run choices. With Same Deck/Stake
@@ -1555,8 +1593,24 @@ function WAR.UI.create_lobby_panels()
         seed_bar,
     }
 
-    G.WAR_LOBBY_LEFT       = war_panel_box(players_def,              "cli", LOFF,  -1.1, "left")
-    G.WAR_LOBBY_SPECTATORS = war_panel_box(spectators_def,           "cli", LOFF,   1.1, "spec")
+    local offsets = WAR.UI._panel_offsets
+    if not offsets.left then
+        players.alignment.offset.y = -(spectators.T.h + PAD) / 2
+        players:align_to_major()
+        players:hard_set_VT()
+    end
+    if not offsets.spec then
+        local below = players.alignment.offset.y + (players.T.h + spectators.T.h) / 2 + PAD
+        spectators.alignment.offset.y = math.min(below, (room_h - spectators.T.h) / 2 - PAD)
+        spectators:align_to_major()
+        spectators:hard_set_VT()
+    end
+    WAR.UI._panel_room_height = room_h
+    G.WAR_LOBBY_LEFT, G.WAR_LOBBY_SPECTATORS = players, spectators
+    for _, role in ipairs({"host", "guest"}) do
+        WAR.SPECTATOR.track_slot(G.WAR_LOBBY_LEFT:get_UIE_by_ID("war_seat_" .. role), role)
+    end
+    WAR.SPECTATOR.track_slot(G.WAR_LOBBY_SPECTATORS.UIRoot, "spectators")
     G.WAR_LOBBY_RIGHT      = war_panel_box(right_panel_root(right_content), "cri", -PAD,  0, "right")
 
     -- Centre visuals: WR ambigram + ace card
@@ -1687,6 +1741,20 @@ local _drag_click_panel = nil
 function WAR.UI.update_panel_drag()
     local drag = WAR.UI._drag
     if not G.CONTROLLER then return end
+    if G.WAR_LOBBY_LEFT and WAR.UI._panel_room_height ~= G.ROOM_ATTACH.T.h then
+        WAR.UI.create_lobby_panels()
+        return
+    end
+    local now = G.TIMERS.REAL
+    if G.OVERLAY_MENU or not WAR.LOBBY.code then
+        drag.active, drag.spectate_at = false, nil
+        drag.was_down = G.CONTROLLER.is_cursor_down
+        return
+    end
+    if drag.spectate_at and now >= drag.spectate_at then
+        drag.spectate_at = nil
+        G.FUNCS.war_give_up_seat()
+    end
 
     local is_down = G.CONTROLLER.is_cursor_down
     local cx = G.CURSOR and G.CURSOR.T.x or 0
@@ -1704,7 +1772,7 @@ function WAR.UI.update_panel_drag()
             local b = p.box
             if b and b:collides_with_point(G.CURSOR.T) then
                 -- Double-click: reset to default.
-                local now = G.TIMERS and G.TIMERS.REAL or 0
+                drag.spectate_at = nil
                 if _drag_click_panel == p.key and (now - _drag_click_time) < 0.3 then
                     WAR.UI._panel_offsets[p.key] = nil
                     _drag_click_panel = nil
@@ -1714,6 +1782,7 @@ function WAR.UI.update_panel_drag()
                 _drag_click_time  = now
                 _drag_click_panel = p.key
 
+                drag.moved    = false
                 drag.active   = true
                 drag.panel    = b
                 drag.key      = p.key
@@ -1730,6 +1799,7 @@ function WAR.UI.update_panel_drag()
     if drag.active and is_down and drag.panel then
         local dx = cx - drag.start_cx
         local dy = cy - drag.start_cy
+        if math.abs(dx) > 0.1 or math.abs(dy) > 0.1 then drag.moved = true end
         drag.panel.alignment.offset.x = drag.start_ox + dx
         drag.panel.alignment.offset.y = drag.start_oy + dy
         drag.panel:align_to_major()
@@ -1738,7 +1808,11 @@ function WAR.UI.update_panel_drag()
 
     -- Release: commit position.
     if drag.active and not is_down then
-        if drag.panel then
+        if drag.key == "spec" and not drag.moved and drag.panel:collides_with_point(G.CURSOR.T) then
+            -- A double-click resets the panel instead of switching roles.
+            drag.spectate_at = math.max(now, _drag_click_time + 0.3)
+        end
+        if drag.panel and drag.moved then
             WAR.UI._panel_offsets[drag.key] = {
                 x = drag.panel.alignment.offset.x,
                 y = drag.panel.alignment.offset.y,

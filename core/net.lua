@@ -8,6 +8,7 @@ WAR.NET.RELAY_HOST = "167.71.87.77"
 WAR.NET.RELAY_PORT = 7777
 
 local sock      = nil
+local unsent   = ""
 local recv_buf  = ""
 WAR.NET._expected_seq = nil   -- next expected _seq from server; nil = first message
 
@@ -23,6 +24,7 @@ function WAR.NET.connect()
     -- Ask the OS to send keepalive probes on idle connections.
     -- This catches dead sockets that TCP itself wouldn't detect for minutes.
     pcall(function() s:setoption("keepalive", true) end)
+    pcall(function() s:setoption("tcp-nodelay", true) end)
     sock = s
     WAR.NET.sock = sock
     recv_buf = ""
@@ -34,6 +36,7 @@ end
 function WAR.NET.disconnect()
     if sock then
         pcall(function() sock:close() end)
+        unsent = ""
         sock = nil
         WAR.NET.sock = nil
         recv_buf = ""
@@ -45,10 +48,22 @@ function WAR.NET.connected()
     return sock ~= nil
 end
 
+function WAR.NET.frame_writable()
+    return sock ~= nil and unsent == ""
+end
+
+local function send_bytes(bytes)
+    -- On timeout, partial is the index of the last byte sent.
+    -- https://lunarmodules.github.io/luasocket/tcp.html#send
+    local sent, err, partial = sock:send(bytes)
+    unsent = sent and "" or bytes:sub((partial or 0) + 1)
+    if err and err ~= "timeout" then WAR.log("[WAR NET] send err: " .. tostring(err)) end
+end
+
 function WAR.NET.send(msg)
     if not sock then return end
-    local ok, err = sock:send(json.encode(msg) .. "\n")
-    if not ok then WAR.log("[WAR NET] send err: " .. tostring(err)) end
+    if unsent ~= "" and msg.action == "watchFrame" then return end
+    send_bytes(unsent .. json.encode(msg) .. "\n")
 end
 
 -- Achievement plumbing. Call sites name the achievement key and nothing else,
@@ -65,9 +80,9 @@ end
 
 function WAR.NET.poll()
     if not sock then return {} end
-    -- receive(4096) with timeout=0 returns nil,"timeout",partial when < 4096 bytes
-    -- available. Accumulate the partial too, not just the "full" chunk.
-    local chunk, err, partial = sock:receive(4096)
+    if unsent ~= "" then send_bytes(unsent) end
+    -- A timeout can still return data in partial.
+    local chunk, err, partial = sock:receive(512 * 1024)
     if chunk then
         recv_buf = recv_buf .. chunk
     elseif partial and #partial > 0 then
@@ -80,10 +95,12 @@ function WAR.NET.poll()
     end
 
     local msgs = {}
+    local start = 1
     while true do
-        local line, rest = recv_buf:match("^([^\n]+)\n(.*)")
-        if not line then break end
-        recv_buf = rest
+        local stop = recv_buf:find("\n", start, true)
+        if not stop then break end
+        local line = recv_buf:sub(start, stop - 1)
+        start = stop + 1
         local ok, decoded = pcall(json.decode, line)
         if ok and decoded then
             -- Track sequence numbers from server to detect relay bugs.
@@ -104,6 +121,7 @@ function WAR.NET.poll()
             end
         end
     end
+    if start > 1 then recv_buf = recv_buf:sub(start) end
     return msgs
 end
 

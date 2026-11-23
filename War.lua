@@ -38,6 +38,7 @@ WAR.load("core/net.lua")
 WAR.load("core/lobby.lua")
 WAR.load("core/auth.lua")
 WAR.load("core/avatar.lua")
+WAR.load("core/spectator.lua")
 WAR.load("core/sync.lua")
 WAR.load("core/game_hooks.lua")
 

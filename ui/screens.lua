@@ -57,6 +57,7 @@ function G.UIDEF.war_join_screen()
             }},
             UIBox_button({ label={localize('war_paste_code')}, button="war_paste_code",
                            colour=G.C.PERISHABLE, minw=5 }),
+            UIBox_button({ label={"Spectate"}, button="war_spectate", colour=G.C.BLUE, minw=5 }),
             UIBox_button({ label={localize('war_join')},       button="war_do_join",
                            colour=G.C.GREEN, minw=5, minh=0.8 }),
         },
@@ -103,7 +104,7 @@ function G.FUNCS.war_do_join(e)
     local code = (WAR.UI._join_code.code or ""):gsub("%s",""):upper()
     if #code < 5 then return end
     G.FUNCS.exit_overlay_menu()
-    local ok, err = WAR.LOBBY.join(code)
+    local ok, err = WAR.LOBBY.join(code, true)
     if not ok then
         WAR.UI.open(create_UIBox_generic_options({
             back_func = "war_join_screen",
